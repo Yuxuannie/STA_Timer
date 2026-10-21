@@ -31,5 +31,6 @@
 - The CLI accepts `--lib` and `--verilog` in either order, each exactly once with a value; anything else prints the usage error.
 - Input files are read as UTF-8; a file that cannot be opened or decoded is reported as unreadable (`ERROR <file>: cannot read file: ...`).
 - Stdout is written as UTF-8 bytes so line endings stay `\n` on every platform.
+- TRACE.md splits `file[:function]` into separate file and function columns, so `-` can mark the function of a data file as section 7 describes.
 
 ## Interventions
