@@ -26,5 +26,7 @@
 - Verilog redeclarations other than `output` + `wire` are errors (`input` twice, `input` + `wire`, `input` + `output`, ...), as are `input`/`output` names missing from the module port list, duplicate instance names, a pin connected twice in one instance, and an instance with an empty connection list.
 - Verilog keywords (`module`, `endmodule`, `input`, `output`, `wire`) cannot be used as names.
 - An error at end of file (Liberty or Verilog, outside an open Liberty group) reports the line where the file ends.
+- Link-time driver checks run over nets in declaration order, so the first bad net in the netlist is reported; for a net declared both `output` and `wire`, the reported line is its first declaration.
+- An input port with no loads, or an instance output pin left unconnected, is not an error; such nodes simply have no net edges.
 
 ## Interventions
