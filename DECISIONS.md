@@ -28,5 +28,8 @@
 - An error at end of file (Liberty or Verilog, outside an open Liberty group) reports the line where the file ends.
 - Link-time driver checks run over nets in declaration order, so the first bad net in the netlist is reported; for a net declared both `output` and `wire`, the reported line is its first declaration.
 - An input port with no loads, or an instance output pin left unconnected, is not an error; such nodes simply have no net edges.
+- The CLI accepts `--lib` and `--verilog` in either order, each exactly once with a value; anything else prints the usage error.
+- Input files are read as UTF-8; a file that cannot be opened or decoded is reported as unreadable (`ERROR <file>: cannot read file: ...`).
+- Stdout is written as UTF-8 bytes so line endings stay `\n` on every platform.
 
 ## Interventions
