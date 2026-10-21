@@ -1,0 +1,313 @@
+/*
+ * toy_lib -- a small Liberty library for the toy STA, stage 1.
+ * The structure follows production libraries; all values are made up.
+ * Cells: ND2D1 (used by data/c17.v) and INVD1 (unused).
+ */
+library (toy_lib) {
+  technology (cmos);
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  voltage_unit : "1V";
+  current_unit : "1mA";
+  leakage_power_unit : "1nW";
+  capacitive_load_unit (1, pf);
+  nom_process : 1.0;
+  nom_voltage : 0.9;
+  nom_temperature : 25.0;
+  define (process_corner, operating_conditions, string);
+  define (cell_footprint_class, cell, string);
+
+  operating_conditions (typical) {
+    process_corner : "TT";
+    process : 1.0;
+    voltage : 0.9;
+    temperature : 25.0;
+  }
+  default_operating_conditions : typical;
+
+  lu_table_template (delay_template_3x3) {
+    variable_1 : input_net_transition;
+    variable_2 : total_output_net_capacitance;
+    index_1 ("0.005, 0.02, 0.08");
+    index_2 ("0.0005, 0.002, 0.008");
+  }
+  power_lut_template (power_template_3x3) {
+    variable_1 : input_transition_time;
+    variable_2 : total_output_net_capacitance;
+    index_1 ("0.005, 0.02, 0.08");
+    index_2 ("0.0005, 0.002, 0.008");
+  }
+
+  cell (ND2D1) {
+    cell_footprint_class : "nd2";
+    area : 1.08;
+    cell_leakage_power : 1.25e-03;
+    leakage_power () {
+      when : "!A1&!A2";
+      value : 8.0e-04;
+    }
+    leakage_power () {
+      when : "A1&A2";
+      value : 2.1e-03;
+    }
+    pg_pin (VDD) {
+      voltage_name : VDD;
+      pg_type : primary_power;
+    }
+    pg_pin (VSS) {
+      voltage_name : VSS;
+      pg_type : primary_ground;
+    }
+    pin (A1) {
+      direction : input;
+      related_power_pin : VDD;
+      related_ground_pin : VSS;
+      capacitance : 0.00071;
+      rise_capacitance : 0.00070;
+      fall_capacitance : 0.00072;
+      rise_capacitance_range (0.00066, 0.00070);
+      fall_capacitance_range (0.00068, 0.00072);
+      internal_power () {
+        rise_power (scalar) {
+          values ("0.00042");
+        }
+        fall_power (scalar) {
+          values ("0.00038");
+        }
+      }
+    }
+    pin (A2) {
+      direction : input;
+      related_power_pin : VDD;
+      related_ground_pin : VSS;
+      capacitance : 0.00064;
+      rise_capacitance : 0.00063;
+      fall_capacitance : 0.00065;
+      rise_capacitance_range (0.00060, 0.00063);
+      fall_capacitance_range (0.00061, 0.00065);
+      internal_power () {
+        rise_power (scalar) {
+          values ("0.00040");
+        }
+        fall_power (scalar) {
+          values ("0.00036");
+        }
+      }
+    }
+    pin (ZN) {
+      direction : output;
+      related_power_pin : VDD;
+      related_ground_pin : VSS;
+      function : "!(A1&A2)";
+      max_capacitance : 0.12;
+      internal_power () {
+        related_pin : "A1";
+        rise_power (power_template_3x3) {
+          values ("0.0021, 0.0023, 0.0030", \
+                  "0.0022, 0.0024, 0.0031", \
+                  "0.0026, 0.0028, 0.0035");
+        }
+        fall_power (power_template_3x3) {
+          values ("0.0017, 0.0019, 0.0026", \
+                  "0.0018, 0.0020, 0.0027", \
+                  "0.0022, 0.0024, 0.0031");
+        }
+      }
+      timing () {
+        related_pin : "A1";
+        timing_sense : negative_unate;
+        timing_type : combinational;
+        cell_rise (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0110, 0.0175, 0.0420", \
+                  "0.0135, 0.0200, 0.0445", \
+                  "0.0210, 0.0280, 0.0530");
+        }
+        rise_transition (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0080, 0.0150, 0.0430", \
+                  "0.0095, 0.0165, 0.0445", \
+                  "0.0150, 0.0220, 0.0500");
+        }
+        cell_fall (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0090, 0.0140, 0.0330", \
+                  "0.0115, 0.0165, 0.0355", \
+                  "0.0185, 0.0240, 0.0430");
+        }
+        fall_transition (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0060, 0.0110, 0.0300", \
+                  "0.0075, 0.0125, 0.0315", \
+                  "0.0120, 0.0170, 0.0360");
+        }
+        ocv_sigma_cell_rise (delay_template_3x3) {
+          sigma_type : early_and_late;
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0011, 0.0018, 0.0042", \
+                  "0.0014, 0.0020, 0.0045", \
+                  "0.0021, 0.0028, 0.0053");
+        }
+        ocv_sigma_cell_fall (delay_template_3x3) {
+          sigma_type : early_and_late;
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0009, 0.0014, 0.0033", \
+                  "0.0012, 0.0017, 0.0036", \
+                  "0.0019, 0.0024, 0.0043");
+        }
+      }
+      timing () {
+        related_pin : "A2";
+        timing_sense : negative_unate;
+        timing_type : combinational;
+        cell_rise (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0120, 0.0185, 0.0430", \
+                  "0.0145, 0.0210, 0.0455", \
+                  "0.0220, 0.0290, 0.0540");
+        }
+        rise_transition (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0085, 0.0155, 0.0435", \
+                  "0.0100, 0.0170, 0.0450", \
+                  "0.0155, 0.0225, 0.0505");
+        }
+        cell_fall (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0100, 0.0150, 0.0340", \
+                  "0.0125, 0.0175, 0.0365", \
+                  "0.0195, 0.0250, 0.0440");
+        }
+        fall_transition (delay_template_3x3) {
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0065, 0.0115, 0.0305", \
+                  "0.0080, 0.0130, 0.0320", \
+                  "0.0125, 0.0175, 0.0365");
+        }
+        ocv_sigma_cell_rise (delay_template_3x3) {
+          sigma_type : early_and_late;
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0012, 0.0019, 0.0043", \
+                  "0.0015, 0.0021, 0.0046", \
+                  "0.0022, 0.0029, 0.0054");
+        }
+        ocv_sigma_cell_fall (delay_template_3x3) {
+          sigma_type : early_and_late;
+          index_1 ("0.005, 0.02, 0.08");
+          index_2 ("0.0005, 0.002, 0.008");
+          values ("0.0010, 0.0015, 0.0034", \
+                  "0.0013, 0.0018, 0.0037", \
+                  "0.0020, 0.0025, 0.0044");
+        }
+      }
+    }
+  }
+
+  cell (INVD1) {
+    cell_footprint_class : "inv";
+    area : 0.72;
+    cell_leakage_power : 9.5e-04;
+    leakage_power () {
+      when : "!I";
+      value : 1.1e-03;
+    }
+    leakage_power () {
+      when : "I";
+      value : 8.0e-04;
+    }
+    pg_pin (VDD) {
+      voltage_name : VDD;
+      pg_type : primary_power;
+    }
+    pg_pin (VSS) {
+      voltage_name : VSS;
+      pg_type : primary_ground;
+    }
+    pin (I) {
+      direction : input;
+      related_power_pin : VDD;
+      related_ground_pin : VSS;
+      capacitance : 0.00055;
+      rise_capacitance : 0.00054;
+      fall_capacitance : 0.00056;
+      rise_capacitance_range (0.00051, 0.00054);
+      fall_capacitance_range (0.00052, 0.00056);
+      internal_power () {
+        rise_power (scalar) {
+          values ("0.00031");
+        }
+        fall_power (scalar) {
+          values ("0.00028");
+        }
+      }
+    }
+    pin (ZN) {
+      direction : output;
+      related_power_pin : VDD;
+      related_ground_pin : VSS;
+      function : "!I";
+      max_capacitance : 0.10;
+      internal_power () {
+        related_pin : "I";
+        rise_power (power_template_3x3) {
+          values ("0.0015, 0.0017, 0.0023", \
+                  "0.0016, 0.0018, 0.0024", \
+                  "0.0019, 0.0021, 0.0027");
+        }
+        fall_power (power_template_3x3) {
+          values ("0.0012, 0.0014, 0.0020", \
+                  "0.0013, 0.0015, 0.0021", \
+                  "0.0016, 0.0018, 0.0024");
+        }
+      }
+      timing () {
+        related_pin : "I";
+        timing_sense : negative_unate;
+        timing_type : combinational;
+        cell_rise (delay_template_3x3) {
+          values ("0.0080, 0.0140, 0.0370", \
+                  "0.0100, 0.0160, 0.0390", \
+                  "0.0165, 0.0230, 0.0460");
+        }
+        rise_transition (delay_template_3x3) {
+          values ("0.0070, 0.0135, 0.0400", \
+                  "0.0085, 0.0150, 0.0415", \
+                  "0.0135, 0.0200, 0.0465");
+        }
+        cell_fall (delay_template_3x3) {
+          values ("0.0065, 0.0110, 0.0290", \
+                  "0.0085, 0.0130, 0.0310", \
+                  "0.0150, 0.0200, 0.0380");
+        }
+        fall_transition (delay_template_3x3) {
+          values ("0.0050, 0.0095, 0.0270", \
+                  "0.0065, 0.0110, 0.0285", \
+                  "0.0105, 0.0150, 0.0325");
+        }
+        ocv_sigma_cell_rise (delay_template_3x3) {
+          sigma_type : early_and_late;
+          values ("0.0008, 0.0014, 0.0037", \
+                  "0.0010, 0.0016, 0.0039", \
+                  "0.0017, 0.0023, 0.0046");
+        }
+        ocv_sigma_cell_fall (delay_template_3x3) {
+          sigma_type : early_and_late;
+          values ("0.0007, 0.0011, 0.0029", \
+                  "0.0009, 0.0013, 0.0031", \
+                  "0.0015, 0.0020, 0.0038");
+        }
+      }
+    }
+  }
+}

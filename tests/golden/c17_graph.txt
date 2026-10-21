@@ -1,0 +1,53 @@
+# design c17 | library toy_lib | cap_unit 1pf
+# nodes 25 | edges 26 (net 14, cell 12)
+N1 [PI]
+  net  -> U1/A1  cap=0.00071
+N2 [PI]
+  net  -> U3/A1  cap=0.00071
+N3 [PI]
+  net  -> U1/A2  cap=0.00064
+  net  -> U2/A1  cap=0.00071
+N6 [PI]
+  net  -> U2/A2  cap=0.00064
+N7 [PI]
+  net  -> U4/A2  cap=0.00064
+U1/A1 [ND2D1 input cap=0.00071]
+  cell -> U1/ZN  negative_unate
+U1/A2 [ND2D1 input cap=0.00064]
+  cell -> U1/ZN  negative_unate
+U1/ZN [ND2D1 output]
+  net  -> U5/A1  cap=0.00071
+U2/A1 [ND2D1 input cap=0.00071]
+  cell -> U2/ZN  negative_unate
+U2/A2 [ND2D1 input cap=0.00064]
+  cell -> U2/ZN  negative_unate
+U2/ZN [ND2D1 output]
+  net  -> U3/A2  cap=0.00064
+  net  -> U4/A1  cap=0.00071
+U3/A1 [ND2D1 input cap=0.00071]
+  cell -> U3/ZN  negative_unate
+U3/A2 [ND2D1 input cap=0.00064]
+  cell -> U3/ZN  negative_unate
+U3/ZN [ND2D1 output]
+  net  -> U5/A2  cap=0.00064
+  net  -> U6/A1  cap=0.00071
+U4/A1 [ND2D1 input cap=0.00071]
+  cell -> U4/ZN  negative_unate
+U4/A2 [ND2D1 input cap=0.00064]
+  cell -> U4/ZN  negative_unate
+U4/ZN [ND2D1 output]
+  net  -> U6/A2  cap=0.00064
+U5/A1 [ND2D1 input cap=0.00071]
+  cell -> U5/ZN  negative_unate
+U5/A2 [ND2D1 input cap=0.00064]
+  cell -> U5/ZN  negative_unate
+U5/ZN [ND2D1 output]
+  net  -> N22  PO
+U6/A1 [ND2D1 input cap=0.00071]
+  cell -> U6/ZN  negative_unate
+U6/A2 [ND2D1 input cap=0.00064]
+  cell -> U6/ZN  negative_unate
+U6/ZN [ND2D1 output]
+  net  -> N23  PO
+N22 [PO]
+N23 [PO]
