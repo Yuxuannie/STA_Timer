@@ -11,5 +11,16 @@
 - A Liberty file holds exactly one top-level group; anything after it is a parse error.
 - A Liberty parse error at end of file inside a group is reported as that innermost group being unclosed, at its header line.
 - A newline inside a quoted Liberty string without a `\` continuation is kept as part of the string.
+- When a Liberty attribute is repeated where one value is expected (`direction`, `capacitance`, `timing_sense`, ...), the first occurrence is used.
+- Two `cell` groups with the same name: the later one replaces the earlier in `Library.cells`.
+- `pin (A, B)` defines one signal pin per listed name, sharing the group's attributes; a `pin` group with no name is an error.
+- A `pin` without `direction` is an error at the pin group's line.
+- A `related_pin` that is not a signal pin of the same cell is an error at the `related_pin` line (the linker could not build the arc otherwise).
+- A `timing ()` group without `related_pin` defines no arcs.
+- A missing `capacitive_load_unit`, or one without exactly two values, is an error at the library line (the graph header needs it).
+- A timing group with two NLDM tables of the same header keeps the later one; `Timing.tables` is keyed by header.
+- The unknown-template check runs for every NLDM table, even one that gives both indices itself; templates come from `lu_table_template` only (plus the predefined `scalar`).
+- Absent indices are returned as `[]`: 1-D tables have `index_2 == []`, `scalar` tables have both empty and `values == [[v]]`.
+- An NLDM table with `index_2` but no `index_1` (own or from the template) is a shape error.
 
 ## Interventions
