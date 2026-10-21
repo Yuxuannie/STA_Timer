@@ -22,5 +22,9 @@
 - The unknown-template check runs for every NLDM table, even one that gives both indices itself; templates come from `lu_table_template` only (plus the predefined `scalar`).
 - Absent indices are returned as `[]`: 1-D tables have `index_2 == []`, `scalar` tables have both empty and `values == [[v]]`.
 - An NLDM table with `index_2` but no `index_1` (own or from the template) is a shape error.
+- A Verilog net must be declared (as a port or wire) before the connection that uses it; the error is reported at the net name.
+- Verilog redeclarations other than `output` + `wire` are errors (`input` twice, `input` + `wire`, `input` + `output`, ...), as are `input`/`output` names missing from the module port list, duplicate instance names, a pin connected twice in one instance, and an instance with an empty connection list.
+- Verilog keywords (`module`, `endmodule`, `input`, `output`, `wire`) cannot be used as names.
+- An error at end of file (Liberty or Verilog, outside an open Liberty group) reports the line where the file ends.
 
 ## Interventions
