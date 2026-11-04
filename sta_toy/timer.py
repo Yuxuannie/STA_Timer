@@ -1,8 +1,11 @@
-"""Stage P2 timer (p2_semantics.md). R12: the timing graph; R13: the SDC checks against the design."""
+"""Stage P2 timer (p2_semantics.md). R12: the timing graph; R13: the SDC checks against the
+design; R14: the clock model; R15: forward propagation."""
 
-from sta_toy import P2Error
+from sta_toy import P2Error, lookup
 
 MODES = ("late", "early")
+TOL = 1e-9
+RF_RANK = {"r": 0, "f": 1}
 DELAY_VARS = ("input_net_transition", "total_output_net_capacitance")
 CHECK_VARS = ("constrained_pin_transition", "related_pin_transition")
 
@@ -190,3 +193,91 @@ def check_sdc(sdc, netlist, lib):
             error(line, "%s on output port %s" % (cmd, name))
         elif cmd in ("set_output_delay", "set_load") and name in inputs:
             error(line, "%s on input port %s" % (cmd, name))
+
+
+def run(linked, netlist, lib, sdc):
+    """Everything after parsing, in the error order of §10; returns the timed graph."""
+    check_sdc(sdc, netlist, lib)
+    g = build(linked, netlist, lib, sdc.clock_port, sdc.load)
+    order = topological_order(g)
+    set_sources(g, sdc)
+    forward(g, order)
+    return g
+
+
+def topological_order(g):
+    """Nodes in topological order of net edges and timing() arcs; a cycle is an error."""
+    indegree = {n: len(n.fanin) for n in g.nodes}
+    order = [n for n in g.nodes if indegree[n] == 0]
+    for n in order:
+        for arc in n.fanout:
+            indegree[arc.dst] -= 1
+            if indegree[arc.dst] == 0:
+                order.append(arc.dst)
+    if len(order) < len(g.nodes):
+        # Every node left has a predecessor that is also left: walk back until one repeats.
+        left = set(g.nodes) - set(order)
+        walk = [[n for n in g.nodes if n in left][0]]
+        while walk.count(walk[-1]) < 2:
+            walk.append([a.src for a in walk[-1].fanin if a.src in left][0])
+        loop = walk[walk.index(walk[-1]):][::-1]
+        raise P2Error(None, None, "combinational loop: " + " -> ".join(n.name for n in loop))
+    return order
+
+
+def clock_latency(sdc, pin):
+    """R14: pin-level latency wins over the clock-level value, whatever the line order."""
+    return sdc.pin_latency.get(pin, sdc.clock_latency)
+
+
+def set_sources(g, sdc):
+    """§5: PIs from set_input_delay / set_input_transition, CK pins from the ideal clock."""
+    for n in g.nodes:
+        if n.kind == "PI":
+            delay = sdc.input_delay.get(n.name, {})
+            for rf in ("r", "f"):
+                n.at["late"][rf] = delay.get("max", 0.0)
+                n.at["early"][rf] = delay.get("min", 0.0)
+                for mode in MODES:
+                    n.slew[mode][rf] = sdc.input_transition.get(n.name, 0.0)
+        elif n.kind == "CK":
+            for mode in MODES:
+                n.at[mode]["r"] = clock_latency(sdc, n.name)
+                n.slew[mode]["r"] = sdc.clock_transition
+
+
+def arc_delay(arc, mode, rf_in, rf_out):
+    """Delay and output slew of one arc pair, with the source's slew in `mode` (§3)."""
+    slew = arc.src.slew[mode][rf_in]
+    if arc.tables is None:
+        return 0.0, slew
+    delay, transition = arc.tables[rf_out]
+    args = {"input_net_transition": slew, "total_output_net_capacitance": arc.dst.load}
+    return lookup.lookup(delay, args), lookup.lookup(transition, args)
+
+
+def forward(g, order):
+    """§6: AT is the max (late) / min (early) over incoming arcs, ties to the first
+    candidate by (source name, r before f); SLEW is the worst over all arcs."""
+    for v in order:
+        if v.kind in ("PI", "CK", "clock_port"):
+            continue
+        for mode in MODES:
+            for rf in ("r", "f"):
+                cands = []
+                for arc in v.fanin:
+                    for rf_u, rf_v in arc.pairs:
+                        at = arc.src.at[mode][rf_u]
+                        if rf_v == rf and at is not None:
+                            delay, slew = arc_delay(arc, mode, rf_u, rf)
+                            cands.append((arc.src.name, RF_RANK[rf_u], at + delay, slew, (arc.src, rf_u)))
+                if not cands:
+                    continue
+                cands.sort(key=lambda c: c[:2])
+                best = cands[0]
+                for c in cands[1:]:
+                    if (c[2] > best[2] + TOL) if mode == "late" else (c[2] < best[2] - TOL):
+                        best = c
+                v.at[mode][rf] = best[2]
+                v.pred[mode][rf] = best[4]
+                v.slew[mode][rf] = (max if mode == "late" else min)(c[3] for c in cands)
