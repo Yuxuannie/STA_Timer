@@ -1,0 +1,6 @@
+FF1/D setup 8.2000 : FF2/CK(r) -> FF2/Q(r) -> FF1/D(r)
+FF1/D hold 1.4000 : FF2/CK(r) -> FF2/Q(r) -> FF1/D(r)
+FF2/D setup 6.2000 : x(f) -> U1/A(f) -> U1/Y(f) -> U2/B(f) -> U2/Y(r) -> FF2/D(r)
+FF2/D hold 2.4000 : FF1/CK(r) -> FF1/Q(f) -> U2/A(f) -> U2/Y(r) -> FF2/D(r)
+y setup 6.5000 : FF2/CK(r) -> FF2/Q(r) -> y(r)
+y hold 2.0000 : FF2/CK(r) -> FF2/Q(r) -> y(r)

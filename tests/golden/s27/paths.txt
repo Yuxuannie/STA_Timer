@@ -1,0 +1,7 @@
+FF5/D setup 1.1373 : G0(f) -> U14/A(f) -> U14/Y(r) -> U8/A(r) -> U8/Y(r) -> U15/B(r) -> U15/Y(r) -> U9/B(r) -> U9/Y(f) -> U11/B(f) -> U11/Y(r) -> U10/B(r) -> U10/Y(f) -> FF5/D(f)
+FF5/D hold 2.1400 : G0(r) -> U14/A(r) -> U14/Y(f) -> U10/A(f) -> U10/Y(r) -> FF5/D(r)
+FF6/D setup 1.9817 : G0(f) -> U14/A(f) -> U14/Y(r) -> U8/A(r) -> U8/Y(r) -> U15/B(r) -> U15/Y(r) -> U9/B(r) -> U9/Y(f) -> U11/B(f) -> U11/Y(r) -> FF6/D(r)
+FF6/D hold 1.9075 : FF5/CK(r) -> FF5/Q(r) -> U11/A(r) -> U11/Y(f) -> FF6/D(f)
+FF7/D setup 6.4620 : FF7/CK(r) -> FF7/Q(f) -> U12/B(f) -> U12/Y(r) -> U13/B(r) -> U13/Y(f) -> FF7/D(f)
+FF7/D hold 0.9600 : G2(r) -> U13/A(r) -> U13/Y(f) -> FF7/D(f)
+G17 setup 0.3706 : G0(f) -> U14/A(f) -> U14/Y(r) -> U8/A(r) -> U8/Y(r) -> U15/B(r) -> U15/Y(r) -> U9/B(r) -> U9/Y(f) -> U11/B(f) -> U11/Y(r) -> U17/A(r) -> U17/Y(f) -> G17(f)
