@@ -203,5 +203,68 @@ class AccessorTests(unittest.TestCase):
         self.assertLoadError(text, 19, ["MYCELL", "MYOUT"])
 
 
+
+TOY2_LIB = os.path.join(ROOT, "data", "toy2.lib")
+
+
+class TimingAccessorTests(unittest.TestCase):
+    """R10: the accessors the timer needs, read from data/toy2.lib."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lib = liberty.load(TOY2_LIB)
+
+    def test_template_variables(self):
+        rise = self.lib.cells["BUF"].pin("Y").timings[0].tables["cell_rise"]
+        self.assertEqual(rise.variables, ("total_output_net_capacitance", "input_net_transition"))
+        self.assertEqual(rise.index_1, [0.001, 0.004, 0.016])
+        self.assertEqual(rise.index_2, [0.01, 0.05, 0.2])
+
+    def test_flop_arcs(self):
+        dff = self.lib.cells["DFF"]
+        self.assertEqual([p.name for p in dff.pins], ["CK", "D", "Q"])
+        self.assertEqual([p.is_clock for p in dff.pins], [True, False, False])
+        d = dff.pin("D")
+        self.assertEqual([(t.related_pins, t.timing_type) for t in d.timings],
+                         [(["CK"], "setup_rising"), (["CK"], "hold_rising")])
+        for t in d.timings:
+            self.assertEqual(sorted(t.tables), ["fall_constraint", "rise_constraint"])
+            self.assertEqual(t.tables["rise_constraint"].variables,
+                             ("constrained_pin_transition", "related_pin_transition"))
+        hold = d.timings[1].tables["rise_constraint"]
+        self.assertEqual(hold.values[0][0], -0.02)
+        q = dff.pin("Q").timings[0]
+        self.assertEqual((q.related_pins, q.timing_type, q.timing_sense),
+                         (["CK"], "rising_edge", "non_unate"))
+        self.assertEqual(sorted(q.tables),
+                         ["cell_fall", "cell_rise", "fall_transition", "rise_transition"])
+
+    def test_table_index_overrides_template(self):
+        text = (
+            "library (o) {\n"
+            "  capacitive_load_unit (1, pf);\n"
+            "  lu_table_template (t) {\n"
+            "    variable_1 : input_net_transition;\n"
+            "    variable_2 : total_output_net_capacitance;\n"
+            '    index_1 ("1, 2");\n'
+            '    index_2 ("10, 20");\n'
+            "  }\n"
+            "  cell (C) {\n"
+            "    pin (A) { direction : input; capacitance : 0.001; }\n"
+            "    pin (Z) {\n"
+            "      direction : output;\n"
+            "      timing () {\n"
+            '        related_pin : "A";\n'
+            '        cell_rise (t) { index_2 ("30, 40"); values ("1, 2", "3, 4"); }\n'
+            "      }\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+        table = liberty.loads(text, "o.lib").cells["C"].pin("Z").timings[0].tables["cell_rise"]
+        self.assertEqual((table.index_1, table.index_2), ([1.0, 2.0], [30.0, 40.0]))
+        self.assertEqual(table.variables, ("input_net_transition", "total_output_net_capacitance"))
+
+
 if __name__ == "__main__":
     unittest.main()
