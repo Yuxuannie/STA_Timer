@@ -32,5 +32,8 @@
 - Input files are read as UTF-8; a file that cannot be opened or decoded is reported as unreadable (`ERROR <file>: cannot read file: ...`).
 - Stdout is written as UTF-8 bytes so line endings stay `\n` on every platform.
 - TRACE.md splits `file[:function]` into separate file and function columns, so `-` can mark the function of a data file as section 7 describes.
+- 2026-11-04 · P2 · The P2 prompt calls the stage 1 linker R4 and the graph R5; in this repo R4 is the graph and R5 the linker. Stage 1 IDs are kept as they are in `TRACE.md`. Source: PROMPT_P2.md §0. Later: none.
+- 2026-11-04 · R10 · `rise_constraint` / `fall_constraint` join the four delay/transition kinds in `Timing.tables`, so the stage 1 load-time checks (template exists, shape) cover them too. `Table.variables` holds the template's `variable_1`/`variable_2` (`()` for `scalar`); a table's own `index_1`/`index_2` still override the template's. Source: PROMPT_P2.md R10, p2_semantics.md §4. Later: none.
+- 2026-11-04 · R10 · A pin is a clock pin only when `clock : true` is written; any other value or no attribute means not a clock pin. Source: p2_semantics.md §1. Later: re-check against real libraries in stage 3.
 
 ## Interventions

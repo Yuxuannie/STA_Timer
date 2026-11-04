@@ -214,18 +214,23 @@ class _Parser:
 # ---------------------------------------------------------------------------
 # R2: accessors. Everything is built and validated when the library is loaded.
 
-NLDM_TABLES = ("cell_rise", "cell_fall", "rise_transition", "fall_transition")
+# Delay and transition tables (stage 1), plus the setup/hold constraint tables (R10).
+TABLE_KINDS = ("cell_rise", "cell_fall", "rise_transition", "fall_transition",
+               "rise_constraint", "fall_constraint")
 
 
 class Table:
-    """An NLDM table: index_1/index_2 are lists of float ([] when absent), values a list of rows."""
+    """A lookup table: index_1/index_2 are lists of float ([] when absent), values a list of rows.
+    `variables` names what index_1 and index_2 stand for, from the template's
+    variable_1/variable_2 (() for `scalar`)."""
 
-    def __init__(self, template, index_1, index_2, values, line):
+    def __init__(self, template, index_1, index_2, values, line, variables):
         self.template = template
         self.index_1 = index_1
         self.index_2 = index_2
         self.values = values
         self.line = line
+        self.variables = variables
 
 
 class Timing:
@@ -242,7 +247,7 @@ class Timing:
 
 class Pin:
     def __init__(self, name, direction, capacitance, rise_capacitance, fall_capacitance,
-                 timings, line):
+                 timings, line, is_clock):
         self.name = name
         self.direction = direction
         self.capacitance = capacitance
@@ -250,13 +255,15 @@ class Pin:
         self.fall_capacitance = fall_capacitance
         self.timings = timings
         self.line = line
+        self.is_clock = is_clock
 
 
 class Cell:
-    def __init__(self, name, pins, line):
+    def __init__(self, name, pins, line, file):
         self.name = name
         self.pins = pins
         self.line = line
+        self.file = file
 
     def pin(self, name):
         for p in self.pins:
@@ -329,8 +336,10 @@ class _Builder:
         for g in root.find_groups("lu_table_template"):
             tname = self.names(g)[0]
             ctx = "lu_table_template " + tname
+            variables = tuple(a.values[0] for n in ("variable_1", "variable_2")
+                              for a in g.find_attrs(n)[:1])
             templates[tname] = (self.index(g, "index_1", ctx, None),
-                                self.index(g, "index_2", ctx, None))
+                                self.index(g, "index_2", ctx, None), variables)
         cells = {}
         for g in root.find_groups("cell"):
             cell = self.cell(g, templates)
@@ -342,7 +351,7 @@ class _Builder:
         pin_names = [n for g in group.find_groups("pin") for n in self.names(g)]
         pins = [self.pin(g, pin_name, "cell %s pin %s" % (name, pin_name), templates, pin_names)
                 for g in group.find_groups("pin") for pin_name in g.names]
-        return Cell(name, pins, group.line)
+        return Cell(name, pins, group.line, self.filename)
 
     def pin(self, group, name, ctx, templates, pin_names):
         attr = self.first(group, "direction")
@@ -358,7 +367,8 @@ class _Builder:
         if direction == "input" and caps[0] is None:
             self.error(group, "%s: input pin has no capacitance" % ctx)
         timings = [self.timing(g, ctx, templates, pin_names) for g in group.find_groups("timing")]
-        return Pin(name, direction, caps[0], caps[1], caps[2], timings, group.line)
+        is_clock = self.text(group, "clock", "false") == "true"
+        return Pin(name, direction, caps[0], caps[1], caps[2], timings, group.line, is_clock)
 
     def timing(self, group, ctx, templates, pin_names):
         attr = self.first(group, "related_pin")
@@ -368,7 +378,7 @@ class _Builder:
                 self.error(attr, "%s: related_pin %s is not a pin of the cell" % (ctx, name))
         tables = {}
         for g in group.groups:
-            if g.header in NLDM_TABLES:
+            if g.header in TABLE_KINDS:
                 tables[g.header] = self.table(g, "%s %s" % (ctx, g.header), templates)
         return Timing(related, self.text(group, "timing_sense", None),
                       self.text(group, "timing_type", "combinational"),
@@ -378,8 +388,9 @@ class _Builder:
         template = group.names[0] if group.names else ""
         if template == "scalar":
             index_1 = index_2 = None
+            variables = ()
         elif template in templates:
-            index_1, index_2 = templates[template]
+            index_1, index_2, variables = templates[template]
         else:
             self.error(group, "%s: unknown template '%s'" % (ctx, template))
         index_1 = self.index(group, "index_1", ctx, index_1)
@@ -397,4 +408,4 @@ class _Builder:
         if [len(r) for r in rows] != expected:
             self.error(attr, "%s: values shape %s does not match the indices (expected %s)"
                        % (ctx, [len(r) for r in rows], expected))
-        return Table(template, index_1 or [], index_2 or [], rows, group.line)
+        return Table(template, index_1 or [], index_2 or [], rows, group.line, variables)
