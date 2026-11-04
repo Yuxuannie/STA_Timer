@@ -1,4 +1,0 @@
-FF1/D setup 7.7000 : a(r) -> U1/A(r) -> U1/Y(f) -> U2/A(f) -> U2/Y(r) -> FF1/D(r)
-FF1/D hold 1.9000 : a(r) -> U1/A(r) -> U1/Y(f) -> U2/A(f) -> U2/Y(r) -> FF1/D(r)
-y setup 6.4500 : FF1/CK(r) -> FF1/Q(r) -> U3/A(r) -> U3/Y(r) -> y(r)
-y hold 3.5500 : FF1/CK(r) -> FF1/Q(r) -> U3/A(r) -> U3/Y(r) -> y(r)
