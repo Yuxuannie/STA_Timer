@@ -1,5 +1,6 @@
 """Stage P2 timer (p2_semantics.md). R12: the timing graph; R13: the SDC checks against the
-design; R14: the clock model; R15: forward propagation."""
+design; R14: the clock model; R15: forward propagation; R16: endpoint checks;
+R17: backward propagation."""
 
 from sta_toy import P2Error, lookup
 
@@ -69,6 +70,7 @@ class TimingGraph:
     def __init__(self):
         self.nodes = []
         self.by_name = {}
+        self.endpoints = []
 
     def add_arc(self, src, dst, pairs, tables):
         arc = Arc(src, dst, pairs, tables)
@@ -202,6 +204,8 @@ def run(linked, netlist, lib, sdc):
     order = topological_order(g)
     set_sources(g, sdc)
     forward(g, order)
+    g.endpoints = check(g, sdc)
+    backward(g, order, g.endpoints)
     return g
 
 
@@ -281,3 +285,51 @@ def forward(g, order):
                 v.at[mode][rf] = best[2]
                 v.pred[mode][rf] = best[4]
                 v.slew[mode][rf] = (max if mode == "late" else min)(c[3] for c in cands)
+
+
+def check(g, sdc):
+    """§7: required times of the D pins (constraint tables at D slew x CK slew) and of the
+    output ports with set_output_delay. Returns the endpoints."""
+    endpoints = []
+    for n in g.nodes:
+        if n.kind == "D":
+            for c in n.checks:
+                mode = "late" if c.kind == "setup" else "early"
+                ck_at, ck_slew = c.ck.at[mode]["r"], c.ck.slew[mode]["r"]
+                for rf in ("r", "f"):
+                    if n.slew[mode][rf] is None or ck_at is None:
+                        continue
+                    t = lookup.lookup(c.tables[rf], {"constrained_pin_transition": n.slew[mode][rf],
+                                                     "related_pin_transition": ck_slew})
+                    if c.kind == "setup":
+                        n.rat["late"][rf] = ck_at + sdc.period - t - sdc.uncertainty["setup"]
+                    else:
+                        n.rat["early"][rf] = ck_at + t + sdc.uncertainty["hold"]
+            endpoints.append(n)
+        elif n.kind == "PO" and n.name in sdc.output_delay:
+            delay = sdc.output_delay[n.name]
+            for rf in ("r", "f"):
+                if "max" in delay:
+                    n.rat["late"][rf] = sdc.period - delay["max"]
+                if "min" in delay:
+                    n.rat["early"][rf] = 0.0 - delay["min"]
+            endpoints.append(n)
+    return endpoints
+
+
+def backward(g, order, endpoints):
+    """§8: RAT is the min (late) / max (early) over outgoing arc pairs of RAT(v) - delay,
+    the delay taken with this node's slew; endpoints keep their RAT from §7."""
+    ends = set(endpoints)
+    for u in reversed(order):
+        if u in ends:
+            continue
+        for mode in MODES:
+            for rf in ("r", "f"):
+                if u.slew[mode][rf] is None:
+                    continue
+                cands = [arc.dst.rat[mode][rf_v] - arc_delay(arc, mode, rf, rf_v)[0]
+                         for arc in u.fanout for rf_u, rf_v in arc.pairs
+                         if rf_u == rf and arc.dst.rat[mode][rf_v] is not None]
+                if cands:
+                    u.rat[mode][rf] = (min if mode == "late" else max)(cands)

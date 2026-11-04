@@ -139,5 +139,64 @@ class ForwardTests(unittest.TestCase):
             self.assertIn(pin, cm.exception.message)
 
 
+
+class CheckTests(unittest.TestCase):
+    """R16: endpoint required times; the slack sign uses the D pin's own AT."""
+
+    def slacks(self, scenario, pin="FF2/D"):
+        n = run("ff2", scenario)[pin]
+        return (n.rat["late"]["r"] - n.at["late"]["r"], n.at["early"]["r"] - n.rat["early"]["r"])
+
+    def test_ff2_scenarios(self):
+        cases = {"ff2_default": (5.7, 2.9), "ff2_setupviol": (-0.3, None),
+                 "ff2_holdviol": (None, -0.6), "ff2_skew": (6.2, 2.4),
+                 "ff2_unc": (5.2, 2.6), "ff2_swap": (5.5, 3.6)}
+        for scenario, expected in cases.items():
+            for got, want in zip(self.slacks(scenario), expected):
+                if want is not None:
+                    self.assertAlmostEqual(got, want, delta=1e-9, msg=scenario)
+
+    def test_output_port_required_times(self):
+        y = run("inv2")["y"]
+        self.assertAlmostEqual(y.rat["late"]["r"], 10.0 - 1.0, delta=1e-9)
+        self.assertAlmostEqual(y.rat["early"]["f"], -1.0, delta=1e-9)
+        g17 = run("s27")["G17"]
+        self.assertAlmostEqual(g17.rat["late"]["f"], 9.0, delta=1e-9)
+        self.assertEqual(g17.rat["early"], {"r": None, "f": None})
+
+    def test_extrapolated_constraint(self):
+        # CK slew 0 is below the cons_3x3 grid; linear extrapolation, no clamping.
+        self.assertEqual(round(run("s27")["FF5/D"].rat["late"]["f"], 4), 9.8222)
+
+    def test_endpoints(self):
+        names = [n.name for n in timer.run(*self.setup_design("s27")).endpoints]
+        self.assertEqual(sorted(names), ["FF5/D", "FF6/D", "FF7/D", "G17"])
+
+    def setup_design(self, design):
+        lib = liberty.load(TOY2_LIB)
+        netlist = verilog.load(os.path.join(ROOT, "data", design + ".v"))
+        return (graph.link(netlist, lib), netlist, lib,
+                sdc.load(os.path.join(ROOT, "data", "sdc", design + ".sdc")))
+
+
+class BackwardTests(unittest.TestCase):
+    """R17: fan-out merge, min for late and max for early; CK pins through rising_edge."""
+
+    def test_fanout_merge(self):
+        n = run("ff2", "ff2_default")
+        # FF2/Q drives FF1/D (RAT 9.7 / 0.1) and port y (RAT 8.0 / -0.5).
+        self.assertAlmostEqual(n["FF2/Q"].rat["late"]["r"], 8.0, delta=1e-9)
+        self.assertAlmostEqual(n["FF2/Q"].rat["early"]["r"], 0.1, delta=1e-9)
+        self.assertAlmostEqual(n["FF1/CK"].rat["late"]["r"], 6.7, delta=1e-9)
+        self.assertAlmostEqual(n["FF1/CK"].rat["early"]["r"], -2.9, delta=1e-9)
+        self.assertIsNone(n["FF1/CK"].rat["late"]["f"])
+        self.assertEqual(n["clk"].rat, {"late": {"r": None, "f": None}, "early": {"r": None, "f": None}})
+
+    def test_missing_facet_propagates_na(self):
+        n = run("s27")
+        self.assertEqual(n["U17/A"].rat["early"], {"r": None, "f": None})
+        self.assertIsNotNone(n["U17/A"].rat["late"]["r"])
+
+
 if __name__ == "__main__":
     unittest.main()
