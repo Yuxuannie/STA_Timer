@@ -35,5 +35,6 @@
 - 2026-11-04 · P2 · The P2 prompt calls the stage 1 linker R4 and the graph R5; in this repo R4 is the graph and R5 the linker. Stage 1 IDs are kept as they are in `TRACE.md`. Source: PROMPT_P2.md §0. Later: none.
 - 2026-11-04 · R10 · `rise_constraint` / `fall_constraint` join the four delay/transition kinds in `Timing.tables`, so the stage 1 load-time checks (template exists, shape) cover them too. `Table.variables` holds the template's `variable_1`/`variable_2` (`()` for `scalar`); a table's own `index_1`/`index_2` still override the template's. Source: PROMPT_P2.md R10, p2_semantics.md §4. Later: none.
 - 2026-11-04 · R10 · A pin is a clock pin only when `clock : true` is written; any other value or no attribute means not a clock pin. Source: p2_semantics.md §1. Later: re-check against real libraries in stage 3.
+- 2026-11-04 · R11 · Linear extrapolation: outside the grid the end segment is extended linearly on each axis; nothing is clamped. At a grid point shared by two segments the lower segment is used (both give the same value). Source: p2_semantics.md §4. Later: stage 2 compares extrapolated values with OpenSTA / PrimeTime, which may clamp or use other end-segment rules.
 
 ## Interventions
