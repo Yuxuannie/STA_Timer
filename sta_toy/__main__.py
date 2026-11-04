@@ -3,7 +3,7 @@
 
 import sys
 
-from sta_toy import P2Error, StaError, graph, liberty, sdc, timer, tsv, verilog, writer
+from sta_toy import P2Error, StaError, design, tsv, writer
 
 OPTIONS = ("--lib", "--verilog", "--sdc", "--dump-tsv")
 
@@ -34,18 +34,11 @@ def arguments(argv):
 def main(argv):
     try:
         args = arguments(argv)
-        libs = [liberty.load(path) for path in args["--lib"]]
-        lib = libs[0]
-        for other in libs[1:]:
-            for name, cell in other.cells.items():
-                lib.cells.setdefault(name, cell)
-        netlist = verilog.load(args["--verilog"])
-        linked = graph.link(netlist, lib)
+        lib, netlist, linked = design.load(args["--lib"], args["--verilog"])
         if "--sdc" not in args:
             text = writer.write(linked)
         else:
-            constraints = sdc.load(args["--sdc"])
-            tsv.dump(timer.run(linked, netlist, lib, constraints), args["--dump-tsv"])
+            tsv.dump(design.timed(lib, netlist, linked, args["--sdc"]), args["--dump-tsv"])
             text = ""
     except P2Error as e:
         print(e, file=sys.stderr)

@@ -30,12 +30,14 @@ def _per_mode():
 class Node:
     """kind is 'clock_port', 'PI', 'PO', 'CK', 'D' or 'other'. `cap` is what the node adds
     to the load of the net it sits on (pin capacitance, or set_load for an output port);
-    `load` is LOAD() of the net it drives."""
+    `load` is LOAD() of the net it drives. `cell` is the cell name of an instance pin
+    (None for a port)."""
 
-    def __init__(self, name, kind, cap):
+    def __init__(self, name, kind, cap, cell=None):
         self.name = name
         self.kind = kind
         self.cap = cap
+        self.cell = cell
         self.load = 0.0
         self.fanin = []
         self.fanout = []
@@ -47,14 +49,16 @@ class Node:
 
 
 class Arc:
-    """A net edge (tables None: delay 0, slew copied) or the arc of one timing() group,
-    whose tables map the output rf to its (delay, transition) tables."""
+    """A net edge (kind 'net', tables None: delay 0, slew copied) or the arc of one timing()
+    group (kind 'cell', or 'ckq' for rising_edge), whose tables map the output rf to its
+    (delay, transition) tables."""
 
-    def __init__(self, src, dst, pairs, tables):
+    def __init__(self, src, dst, pairs, tables, kind):
         self.src = src
         self.dst = dst
         self.pairs = pairs
         self.tables = tables
+        self.kind = kind
 
 
 class Check:
@@ -71,9 +75,10 @@ class TimingGraph:
         self.nodes = []
         self.by_name = {}
         self.endpoints = []
+        self.sdc = None
 
-    def add_arc(self, src, dst, pairs, tables):
-        arc = Arc(src, dst, pairs, tables)
+    def add_arc(self, src, dst, pairs, tables, kind):
+        arc = Arc(src, dst, pairs, tables, kind)
         src.fanout.append(arc)
         dst.fanin.append(arc)
 
@@ -110,7 +115,7 @@ def build(linked, netlist, lib, clock_port, port_loads):
             pin = lib.cells[n.cell].pin(n.name.split("/")[1])
             kind = "CK" if pin.is_clock else "other"
             cap = n.cap if n.kind == "input" else None
-        node = Node(n.name, kind, cap)
+        node = Node(n.name, kind, cap, n.cell)
         g.nodes.append(node)
         g.by_name[n.name] = node
 
@@ -126,7 +131,7 @@ def build(linked, netlist, lib, clock_port, port_loads):
             continue
         driver.load = sum(s.cap for s in sinks)
         for sink in sinks:
-            g.add_arc(driver, sink, (("r", "r"), ("f", "f")), None)
+            g.add_arc(driver, sink, (("r", "r"), ("f", "f")), None, "net")
 
     for inst in netlist.instances:
         cell = lib.cells[inst.cell]
@@ -155,8 +160,9 @@ def build(linked, netlist, lib, clock_port, port_loads):
                 tables = {rf: (_table(timing, DELAY_TABLES[rf][0], DELAY_VARS, fail),
                                _table(timing, DELAY_TABLES[rf][1], DELAY_VARS, fail))
                           for rf in sorted(set(out for _, out in pairs))}
+                kind = "ckq" if timing.timing_type == "rising_edge" else "cell"
                 for src in srcs:
-                    g.add_arc(src, dst, pairs, tables)
+                    g.add_arc(src, dst, pairs, tables, kind)
     return g
 
 
@@ -201,6 +207,7 @@ def run(linked, netlist, lib, sdc):
     """Everything after parsing, in the error order of §10; returns the timed graph."""
     check_sdc(sdc, netlist, lib)
     g = build(linked, netlist, lib, sdc.clock_port, sdc.load)
+    g.sdc = sdc
     order = topological_order(g)
     set_sources(g, sdc)
     forward(g, order)

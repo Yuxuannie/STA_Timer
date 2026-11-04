@@ -273,10 +273,11 @@ class Cell:
 
 
 class Library:
-    def __init__(self, name, cap_unit, cells):
+    def __init__(self, name, cap_unit, cells, time_unit=None):
         self.name = name
         self.cap_unit = cap_unit
         self.cells = cells
+        self.time_unit = time_unit
 
 
 def load(path):
@@ -344,7 +345,7 @@ class _Builder:
         for g in root.find_groups("cell"):
             cell = self.cell(g, templates)
             cells[cell.name] = cell
-        return Library(name, cap_unit, cells)
+        return Library(name, cap_unit, cells, self.text(root, "time_unit", None))
 
     def cell(self, group, templates):
         name = self.names(group)[0]
