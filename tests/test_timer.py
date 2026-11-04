@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from sta_toy import graph, liberty, timer, verilog
+from sta_toy import graph, liberty, sdc, timer, verilog
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOY2_LIB = os.path.join(ROOT, "data", "toy2.lib")
@@ -67,6 +67,76 @@ class GraphTests(unittest.TestCase):
         self.assertAlmostEqual(self.node("FF2/Q").load, 0.002 + 0.002, delta=1e-12)
         self.assertAlmostEqual(self.node("U2/Y").load, 0.002, delta=1e-12)
         self.assertAlmostEqual(self.node("x").load, 0.0015, delta=1e-12)
+
+
+def run(design, scenario=None, netlist_text=None, sdc_text=None):
+    """Time a design: files from data/, or netlist / SDC text written by the test."""
+    lib = liberty.load(TOY2_LIB)
+    if netlist_text is None:
+        netlist = verilog.load(os.path.join(ROOT, "data", design + ".v"))
+    else:
+        netlist = verilog.parse(netlist_text, design + ".v")
+    if sdc_text is None:
+        constraints = sdc.load(os.path.join(ROOT, "data", "sdc", (scenario or design) + ".sdc"))
+    else:
+        constraints = sdc.parse(sdc_text, design + ".sdc")
+    return timer.run(graph.link(netlist, lib), netlist, lib, constraints).by_name
+
+
+class ForwardTests(unittest.TestCase):
+    """R14 + R15: sources from the clock model and the SDC, then forward propagation."""
+
+    def assertValues(self, values, expected):
+        for mode in expected:
+            for rf in ("r", "f"):
+                if expected[mode][rf] is None:
+                    self.assertIsNone(values[mode][rf], (mode, rf))
+                else:
+                    self.assertAlmostEqual(values[mode][rf], expected[mode][rf], delta=1e-9, msg=(mode, rf))
+
+    def test_two_routes_late_max_early_min(self):
+        n = run("ff2", "ff2_default")
+        self.assertValues(n["U2/Y"].at, {"late": {"r": 4.0, "f": 4.0}, "early": {"r": 3.0, "f": 3.0}})
+
+    def test_pin_latency_beats_later_clock_latency(self):
+        n = run("ff2", "ff2_swap")
+        self.assertValues(n["FF1/CK"].at, {"late": {"r": 1.5, "f": None}, "early": {"r": 1.5, "f": None}})
+        self.assertValues(n["FF2/CK"].at, {"late": {"r": 0.3, "f": None}, "early": {"r": 0.3, "f": None}})
+        self.assertValues(n["FF2/CK"].slew, {"late": {"r": 0.05, "f": None}, "early": {"r": 0.05, "f": None}})
+        self.assertValues(n["clk"].at, {"late": {"r": None, "f": None}, "early": {"r": None, "f": None}})
+
+    def test_rise_fall_split(self):
+        n = run("inv2")
+        self.assertValues(n["U1/Y"].at, {"late": {"r": 1.2, "f": 0.8}})
+        self.assertValues(n["U2/Y"].at, {"late": {"r": 2.0, "f": 2.0}})
+        self.assertValues(n["y"].at, {"late": {"r": 2.55, "f": 2.55}})
+
+    def test_unset_facets_and_worst_slew(self):
+        n = run("s27")
+        self.assertValues(n["G1"].at, {"late": {"r": 0.0, "f": 0.0}, "early": {"r": 0.0, "f": 0.0}})
+        self.assertValues(n["G2"].slew, {"late": {"r": 0.0, "f": 0.0}, "early": {"r": 0.0, "f": 0.0}})
+        self.assertValues(n["G3"].at, {"late": {"r": 2.0, "f": 2.0}, "early": {"r": 0.0, "f": 0.0}})
+        # U15/Y late rise: slew from a different arc than the one that sets the AT.
+        self.assertAlmostEqual(n["U15/Y"].slew["late"]["r"], 0.056, delta=1e-9)
+
+    def test_combinational_loop(self):
+        netlist = (
+            "module loop (clk, a, z);\n"
+            "  input clk;\n"
+            "  input a;\n"
+            "  output z;\n"
+            "  wire n1, n2;\n"
+            "  NAND2 U1 (.A(a), .B(n2), .Y(n1));\n"
+            "  INV U2 (.A(n1), .Y(n2));\n"
+            "  DFF FF1 (.CK(clk), .D(n1), .Q(z));\n"
+            "endmodule\n")
+        with self.assertRaises(timer.P2Error) as cm:
+            run("loop", netlist_text=netlist,
+                sdc_text="create_clock -name clk -period 10 [get_ports clk]\n")
+        self.assertIsNone(cm.exception.file)
+        self.assertTrue(str(cm.exception).startswith("error: combinational loop: "))
+        for pin in ("U1/Y", "U2/A", "U2/Y", "U1/B"):
+            self.assertIn(pin, cm.exception.message)
 
 
 if __name__ == "__main__":
