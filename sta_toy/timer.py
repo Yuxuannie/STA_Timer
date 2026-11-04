@@ -1,4 +1,4 @@
-"""Stage P2 timer (p2_semantics.md). R12: the timing graph."""
+"""Stage P2 timer (p2_semantics.md). R12: the timing graph; R13: the SDC checks against the design."""
 
 from sta_toy import P2Error
 
@@ -153,3 +153,40 @@ def build(linked, netlist, lib, clock_port, port_loads):
                 for src in srcs:
                     g.add_arc(src, dst, pairs, tables)
     return g
+
+
+def check_sdc(sdc, netlist, lib):
+    """Semantic SDC errors (sdc_subset.md "Errors"), in file order."""
+
+    def error(line, message):
+        raise P2Error(sdc.file, line, message)
+
+    if sdc.clock_name is None:
+        error(sdc.last_line, "no create_clock in the file")
+    pins, clock_pins = set(), set()
+    for inst in netlist.instances:
+        for pin in lib.cells[inst.cell].pins:
+            pins.add(inst.name + "/" + pin.name)
+            if pin.is_clock:
+                clock_pins.add(inst.name + "/" + pin.name)
+    inputs, outputs = set(netlist.inputs), set(netlist.outputs)
+    for line, cmd, kind, name in sdc.objects:
+        if kind == "get_clocks":
+            if name != sdc.clock_name:
+                error(line, "clock %s does not exist" % name)
+        elif kind == "get_pins":
+            if name not in pins:
+                error(line, "pin %s does not exist" % name)
+            if name not in clock_pins:
+                error(line, "pin %s is not a clock pin" % name)
+        elif name not in inputs and name not in outputs:
+            error(line, "port %s does not exist" % name)
+        elif cmd == "create_clock" and name in outputs:
+            error(line, "create_clock on output port %s" % name)
+        elif (cmd in ("set_input_delay", "set_input_transition", "set_load")
+              and name == sdc.clock_port):
+            error(line, "%s on the clock port %s" % (cmd, name))
+        elif cmd in ("set_input_delay", "set_input_transition") and name in outputs:
+            error(line, "%s on output port %s" % (cmd, name))
+        elif cmd in ("set_output_delay", "set_load") and name in inputs:
+            error(line, "%s on input port %s" % (cmd, name))
