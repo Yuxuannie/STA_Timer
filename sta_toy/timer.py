@@ -1,6 +1,6 @@
 """Stage P2 timer (p2_semantics.md). R12: the timing graph; R13: the SDC checks against the
 design; R14: the clock model; R15: forward propagation; R16: endpoint checks;
-R17: backward propagation."""
+R17: backward propagation; R18: slack, worst transition and paths."""
 
 from sta_toy import P2Error, lookup
 
@@ -333,3 +333,31 @@ def backward(g, order, endpoints):
                          if rf_u == rf and arc.dst.rat[mode][rf_v] is not None]
                 if cands:
                     u.rat[mode][rf] = (min if mode == "late" else max)(cands)
+
+
+def slack(node, kind, rf):
+    """§9: setup slack = RAT[late] - AT[late], hold slack = AT[early] - RAT[early]; None if undefined."""
+    if kind == "setup":
+        a, b = node.rat["late"][rf], node.at["late"][rf]
+    else:
+        a, b = node.at["early"][rf], node.rat["early"][rf]
+    return None if a is None or b is None else a - b
+
+
+def worst_rf(node, kind):
+    """The transition with the smaller slack, ties to r; None if neither slack is defined."""
+    r, f = slack(node, kind, "r"), slack(node, kind, "f")
+    if r is None and f is None:
+        return None
+    if r is None or (f is not None and f < r - TOL):
+        return "f"
+    return "r"
+
+
+def worst_path(node, kind, rf):
+    """(node, rf) pairs from the startpoint to (node, rf), following PRED in the check's mode."""
+    mode = "late" if kind == "setup" else "early"
+    path = [(node, rf)]
+    while path[-1][0].pred[mode][path[-1][1]] is not None:
+        path.append(path[-1][0].pred[mode][path[-1][1]])
+    return path[::-1]
