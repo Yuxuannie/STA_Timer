@@ -2,8 +2,8 @@
 
 A Tkinter debug viewer, standard library only. Tk is optional at import time: every
 module except `sta_toy/viewer/app.py` must import without `tkinter`, and the tests that
-need a display skip when `tkinter` is missing or `Tk()` fails. (On this machine only the
-system `/usr/bin/python3` has Tk.)
+need a display skip when a probe (`tkinter.Tk()` in a subprocess) fails, because some
+system Tk builds abort the process instead of raising `TclError`.
 
 ## Start
 
@@ -26,7 +26,8 @@ are `error: ...` lines, exit 1.
   page count (≥ 1). `from_graph(g)` and `from_bundle(b)` build it.
 - `timeline(path, width, margin=40)` → a list of drawing items for one path object
   (json_v1.md), each `{"kind", "x0", "x1", "label"}` with x in pixels: the time span is
-  `[min(0, launch edge, all point at), max(capture edge + latency, required, arrival)]`
+  `[min(0, launch edge, all point at, required, capture edge + latency),
+  max(capture edge + latency, required, arrival)]` (latency 0 when null)
   mapped linearly onto `[margin, width − margin]`. Items: `launch_edge` (x0 = x1),
   `capture_edge`, `arrival`, `required`, `data` (x0 = launch AT, x1 = arrival), and for a
   D endpoint `window` (setup: x0 = required, x1 = capture edge + latency; hold: x0 =
