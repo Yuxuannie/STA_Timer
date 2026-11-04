@@ -211,18 +211,20 @@ class CliTests(TempDirTest):
     checked byte for byte by test_graph.CliTests.test_golden (R19f)."""
 
     def test_unknown_option(self):
-        result = run_cli("--lib", "data/toy.lib", "--verilog", "data/c17.v", "--report-timing")
+        # --report-timing was unknown in P2; P3 (cli_p3.md) made it an option.
+        result = run_cli("--lib", "data/toy.lib", "--verilog", "data/c17.v", "--report-power")
         stderr = self.assertOneLineError(result)
-        self.assertEqual(stderr, "error: unknown option --report-timing\n")
+        self.assertEqual(stderr, "error: unknown option --report-power\n")
 
     def test_sdc_without_dump_tsv(self):
         result = run_cli("--lib", TOY2_LIB, "--verilog", FF2_V,
                          "--sdc", os.path.join(ROOT, "data", "sdc", "ff2_default.sdc"))
-        self.assertOneLineError(result, "^error: --sdc and --dump-tsv must be given together")
+        # cli_p3.md replaced "--sdc and --dump-tsv must be given together" by these two rules.
+        self.assertOneLineError(result, r"^error: --sdc needs an output option \(--dump-tsv, ")
 
     def test_dump_tsv_without_sdc(self):
         result = run_cli("--lib", TOY2_LIB, "--verilog", FF2_V, "--dump-tsv", self.tmp)
-        self.assertOneLineError(result, "^error: --sdc and --dump-tsv must be given together")
+        self.assertOneLineError(result, "^error: --dump-tsv needs --sdc\n$")
         self.assertEqual(os.listdir(self.tmp), [])
 
     def test_missing_verilog(self):
