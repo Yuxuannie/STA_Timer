@@ -1,45 +1,108 @@
-"""CLI: python -m sta_toy --lib <file> [--lib <file> ...] --verilog <file>
-[--sdc <file> --dump-tsv <dir>] (R6; --sdc and --dump-tsv from R18, cli_p2.md)."""
+"""CLI: python -m sta_toy --lib <file> [--lib <file> ...] --verilog <file> [--sdc <file>
+<outputs>] (R6; --sdc and --dump-tsv from R18, cli_p2.md; reports, JSON and bundles
+from R26, cli_p3.md)."""
 
+import re
 import sys
 
 from sta_toy import P2Error, StaError, design, tsv, writer
 
-OPTIONS = ("--lib", "--verilog", "--sdc", "--dump-tsv")
+VALUE_OPTIONS = ("--lib", "--verilog", "--sdc", "--dump-tsv", "--path-delay", "--from", "--to",
+                 "--through", "--max-paths", "--nworst", "--json", "--bundle", "--bundle-out",
+                 "--depth", "--max-nodes")
+FLAGS = ("--report-timing", "--report-summary", "--transition-time", "--capacitance")
+OUTPUTS = ("--dump-tsv", "--report-timing", "--report-summary", "--json", "--bundle")
+NEEDS = {"--path-delay": "--report-timing", "--from": "--report-timing", "--to": "--report-timing",
+         "--through": "--report-timing", "--max-paths": "--report-timing",
+         "--nworst": "--report-timing", "--transition-time": "--report-timing",
+         "--capacitance": "--report-timing", "--depth": "--bundle", "--max-nodes": "--bundle",
+         "--bundle-out": "--bundle", "--bundle": "--bundle-out"}
+INTEGERS = (("--max-paths", 1), ("--nworst", 1), ("--depth", 0), ("--max-nodes", 1))
 
 
 def arguments(argv):
-    """Options as {option: value}, with a list of values for --lib."""
+    """Options as {option: value}: a list for --lib, True for flags, int for counts."""
+
+    def error(message):
+        raise P2Error(None, None, message)
+
     args = {"--lib": []}
-    for i in range(0, len(argv), 2):
+    i = 0
+    while i < len(argv):
         option = argv[i]
-        if option not in OPTIONS:
-            raise P2Error(None, None, "unknown option %s" % option)
-        if i + 1 == len(argv):
-            raise P2Error(None, None, "missing value for %s" % option)
+        i += 1
+        if option in FLAGS:
+            if option in args:
+                error("%s given twice" % option)
+            args[option] = True
+            continue
+        if option not in VALUE_OPTIONS:
+            error("unknown option %s" % option)
+        if i == len(argv):
+            error("missing value for %s" % option)
         if option == "--lib":
-            args[option].append(argv[i + 1])
+            args[option].append(argv[i])
         elif option in args:
-            raise P2Error(None, None, "%s given twice" % option)
+            error("%s given twice" % option)
         else:
-            args[option] = argv[i + 1]
+            args[option] = argv[i]
+        i += 1
     for option in ("--lib", "--verilog"):
         if not args.get(option):
-            raise P2Error(None, None, "missing %s" % option)
-    if ("--sdc" in args) != ("--dump-tsv" in args):
-        raise P2Error(None, None, "--sdc and --dump-tsv must be given together")
+            error("missing %s" % option)
+    if "--sdc" in args and not any(o in args for o in OUTPUTS):
+        error("--sdc needs an output option "
+              "(--dump-tsv, --report-timing, --report-summary, --json or --bundle)")
+    for option in OUTPUTS:
+        if option in args and "--sdc" not in args:
+            error("%s needs --sdc" % option)
+    for option, other in NEEDS.items():
+        if option in args and other not in args:
+            error("%s needs %s" % (option, other))
+    for option, low in INTEGERS:
+        if option in args:
+            if not re.match(r"[0-9]+$", args[option]) or int(args[option]) < low:
+                error("%s needs an integer >= %d" % (option, low))
+            args[option] = int(args[option])
+    if args.get("--path-delay", "max") not in ("max", "min"):
+        error("--path-delay needs max or min")
     return args
+
+
+def run(args):
+    """Everything after the arguments; returns the stdout text. Files are written last."""
+    lib, netlist, linked = design.load(args["--lib"], args["--verilog"])
+    if "--sdc" not in args:
+        return writer.write(linked)
+    from sta_toy import bundle, jsonout, paths, report
+    g = design.timed(lib, netlist, linked, args["--sdc"])
+    text = ""
+    if "--report-timing" in args:
+        check = "setup" if args.get("--path-delay", "max") == "max" else "hold"
+        found = paths.select(g, check, args.get("--max-paths", 1), args.get("--nworst", 1),
+                             args.get("--from"), args.get("--to"), args.get("--through"))
+        objs = [paths.path_json(p, g.sdc, "p%d" % (i + 1)) for i, p in enumerate(found)]
+        text += report.report_timing(objs, "--transition-time" in args, "--capacitance" in args)
+    if "--report-summary" in args:
+        text += report.format_summary(paths.summary(g))
+    files = []
+    if "--json" in args:
+        info = {"name": netlist.name, "libs": args["--lib"], "verilog": args["--verilog"],
+                "sdc": args["--sdc"], "units": jsonout.units(lib)}
+        files.append((jsonout.report_json(g, info), args["--json"]))
+    if "--bundle" in args:
+        files.append((bundle.debug_bundle(g, args["--bundle"], args.get("--depth", 3),
+                                          args.get("--max-nodes", 300)), args["--bundle-out"]))
+    if "--dump-tsv" in args:
+        tsv.dump(g, args["--dump-tsv"])
+    for obj, path in files:
+        jsonout.write(obj, path)
+    return text
 
 
 def main(argv):
     try:
-        args = arguments(argv)
-        lib, netlist, linked = design.load(args["--lib"], args["--verilog"])
-        if "--sdc" not in args:
-            text = writer.write(linked)
-        else:
-            tsv.dump(design.timed(lib, netlist, linked, args["--sdc"]), args["--dump-tsv"])
-            text = ""
+        text = run(arguments(argv))
     except P2Error as e:
         print(e, file=sys.stderr)
         return 1
