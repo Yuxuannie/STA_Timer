@@ -16,8 +16,9 @@ With `--sdc` the tool times a flat design with D flip-flops under one ideal cloc
     python -m sta_toy --lib data/toy2.lib --verilog data/ff2.v \
         --sdc data/sdc/ff2_default.sdc --dump-tsv out/ff2_default
 
-`--sdc` and `--dump-tsv` go together; `--lib` may repeat. Stdout stays empty and the
-exit code is 0. Any error is one line on stderr with exit code 1.
+`--sdc` needs at least one output option (`--dump-tsv`, `--report-timing`,
+`--report-summary`, `--json`, `--bundle`; see below); `--lib` may repeat. With only
+`--dump-tsv` stdout stays empty. Any error is one line on stderr with exit code 1.
 
 | file | content |
 |---|---|
@@ -43,3 +44,33 @@ The slow route through `x` (arrival 4.0) sets the setup slack 9.7 − 4.0; the f
     python3 tools/diff_ref.py tests/golden/ff2_default out/ff2_default --tol 0
 
 Tests (stage 1 and P2, including all eight golden designs): `python3 -m unittest discover -s tests`.
+
+## Reports, JSON and the debug viewer (stages P3, P4)
+
+Rules: `docs/contracts/report_p3.md`, `json_v1.md`, `bundle_v1.md`, `viewer_p4.md`,
+`cli_p3.md` (overview in `SPEC_P3P4.md`).
+
+    # PrimeTime-style path reports: worst setup path, or K worst paths of N endpoints
+    python -m sta_toy --lib data/toy2.lib --verilog data/s27.v --sdc data/sdc/s27.sdc \
+        --report-timing --max-paths 2 --nworst 3 --transition-time --capacitance
+    # hold paths into one pin, only those through a given pin
+    python -m sta_toy ... --report-timing --path-delay min --to FF5/D --through U14/Y
+    # WNS / TNS / NVP for setup and hold
+    python -m sta_toy ... --report-summary
+    # everything as JSON (schema sta_toy.report/1), and one endpoint's fan-in cone
+    python -m sta_toy ... --json out/s27.json --bundle FF5/D --bundle-out out/FF5_D.json --depth 4
+
+The viewer needs a Python with a working Tk. On this Mac the system `/usr/bin/python3`
+(Tk 8.5) aborts when it opens a window; `~/.local/bin/python3.12` (Tk 9.0) works:
+
+    ~/.local/bin/python3.12 -m sta_toy.viewer --lib data/toy2.lib --verilog data/s27.v --sdc data/sdc/s27.sdc
+    ~/.local/bin/python3.12 -m sta_toy.viewer --bundle out/FF5_D.json
+
+Debugging an endpoint: the table (top) lists every endpoint with its setup and hold slack,
+worst setup first, violations in red; click a heading to sort, type in the filter box to
+narrow it. Selecting a row shows, for the chosen check (setup / hold), the full path report
+and a timeline of launch edge, data arrival, required time and the setup or hold window;
+the cone view draws the endpoint's fan-in cone by depth with the worst path in bold
+orange, each box giving AT / RAT / slack, and clicking a box lists all its AT / RAT /
+SLEW values and its fan-in edges. Raise the depth or max-nodes and press reload to look
+further back.

@@ -22,3 +22,14 @@ R17 | sta_toy/timer.py | backward | test_timer.BackwardTests: test_fanout_merge,
 R18 | sta_toy/timer.py, sta_toy/tsv.py, sta_toy/__main__.py | slack, worst_rf, worst_path, tsv.fmt4, tsv.dump, main, arguments | test_cli.GoldenTests: test_designs, test_second_library; test_cli.ForwardTieTests.test_tie; test_cli.CliTests
 R19 | tests/test_liberty.py, tests/test_lookup.py, tests/test_timer.py, tests/test_sdc.py, tests/test_cli.py | - | R19a test_cli.GoldenTests; R19b test_lookup.InterpolationTests; R19c test_lookup.TemplateOrderTests; R19d test_sdc.ParseTests, test_cli.SdcSemanticErrorTests; R19e test_cli.ErrorContractTests; R19f stage 1 tests (test_graph.CliTests.test_golden); R19g test_cli.ForwardTieTests; R19h test_cli.CliTests
 R20 | README.md, TRACE.md, DECISIONS.md | - | -
+R21 | sta_toy/paths.py, sta_toy/design.py, sta_toy/timer.py | Point, Path, worst_path, capture, path_json; design.load, design.timed | test_paths.WorstPathTests, test_paths.PathObjectTests
+R22 | sta_toy/paths.py | enumerate_paths, select | test_paths.WorstPathTests.test_against_golden_paths, test_paths.EnumerationTests; test_cli_p3.ReportCliTests.test_several_paths, test_no_paths
+R23 | sta_toy/report.py | format_path, report_timing | test_report.GoldenReportTests (four hand-written golden reports), test_report.GoldenCrossCheckTests; test_cli_p3.ReportCliTests.test_report_timing
+R24 | sta_toy/paths.py, sta_toy/report.py | summary, format_summary | test_paths.SummaryTests, test_report.SummaryTextTests, test_cli_p3.ReportCliTests.test_summary
+R25 | sta_toy/jsonout.py | units, report_json, dumps, write | test_json.SchemaTests, test_json.GoldenTests, test_json.OutputTests; test_cli_p3.FileOutputTests
+R26 | sta_toy/__main__.py | arguments, run, main | test_cli_p3 (ReportCliTests, FileOutputTests, OptionErrorTests); test_cli.CliTests
+R27 | sta_toy/bundle.py | debug_bundle | test_bundle.ConeTests, test_bundle.ValueTests
+R28 | sta_toy/viewer/model.py, sta_toy/viewer/source.py | EndpointTable, timeline, cone_layout, node_details; EngineSource, BundleSource | test_viewer: EndpointTableTests, TimelineTests, ConeLayoutTests, NodeDetailsTests, SourceTests
+R29 | sta_toy/viewer/app.py, sta_toy/viewer/__main__.py | App, main | test_viewer.TkSmokeTests (skips without a working Tk), test_viewer.ViewerCliTests
+R30 | tests/test_paths.py, tests/test_report.py, tests/test_json.py, tests/test_bundle.py, tests/test_viewer.py, tests/test_cli_p3.py, tests/golden/reports/ | - | -
+R31 | README.md, TRACE.md, DECISIONS.md, SPEC_P3P4.md | - | -
