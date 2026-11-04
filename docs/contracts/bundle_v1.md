@@ -14,9 +14,11 @@ number of timing() arcs (`cell` or `ckq`) on any backward walk from `e` to it; n
 edges add 0. Keep every node with depth ≤ `depth`. For a D endpoint also keep the
 capture CK pin of each of its check arcs, at depth 0.
 
-Order the kept nodes by `(depth, name)`. If there are more than `max_nodes`, keep the
-first `max_nodes` and set `truncated: true`. Edges are the fan-in arcs whose both ends
-are kept, plus one `check` edge per check arc of `e` (CK pin → `e`) when both are kept.
+Order the kept nodes by `(depth, name)`, except that the endpoint itself always comes
+first. If there are more than `max_nodes`, keep the first `max_nodes` and set
+`truncated: true`. Edges are the fan-in arcs whose both ends are kept, plus one `check`
+edge per capture CK pin of `e` (CK pin → `e`, carrying the setup and the hold values of
+the check arcs from that pin) when both ends are kept.
 
 ## Schema
 
@@ -43,7 +45,8 @@ are kept, plus one `check` edge per check arc of `e` (CK pin → `e`) when both 
 - Edge `delay[m][ab]` = the delay of pair `a → b` in mode m (as in forward, with the
   source's SLEW in m), null for pairs the arc does not have or whose source slew is
   undefined. A `check` edge has `delay` null and `check` = the constraint values
-  (`t_su`, `t_h` of report_p3.md §4, per D transition; null where undefined). Edge
+  (`t_su` from the setup_rising arc, `t_h` from the hold_rising arc, as report_p3.md §4
+  defines them, per D transition; null where undefined or where that arc is missing). Edge
   order: by `(v, u, kind)` names; several timing() arcs between the same pins are
   listed in graph order.
 - `paths` = the endpoint's worst setup path then worst hold path (those that exist),
