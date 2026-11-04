@@ -16,6 +16,16 @@ class StaError(Exception):
         return "%s:%d: %s" % (self.file, self.line, self.message)
 
 
+class P2Error(StaError):
+    """An error introduced in stage P2 (cli_p2.md): printed as '<file>:<line>: <message>',
+    or 'error: <message>' when no file is known, without stage 1's 'ERROR ' prefix."""
+
+    def __str__(self):
+        if self.file is None:
+            return "error: %s" % self.message
+        return StaError.__str__(self)
+
+
 def read_file(path):
     """Return the text of `path`; an unreadable file is a StaError with no line."""
     try:
