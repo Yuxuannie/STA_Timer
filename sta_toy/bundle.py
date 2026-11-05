@@ -100,9 +100,20 @@ def debug_bundle(g, endpoint_name, depth=3, max_nodes=300):
         p = paths.worst_path(e, check)
         if p is not None:
             found.append(paths.path_json(p, g.sdc, check))
+    # Cell and library pins of every instance in the cone or on a path, for drawing modules.
+    cells = [(n.name, n.cell) for n in order[:max_nodes]]
+    cells += [(q["pin"], q["cell"]) for p in found for q in p["points"]]
+    instances = {}
+    for pin, cell in cells:
+        if cell is not None and pin.split("/")[0] not in instances:
+            instances[pin.split("/")[0]] = {
+                "cell": cell, "sequential": g.lib.cells[cell].sequential,
+                "pins": [{"name": q.name, "direction": q.direction, "clock": q.is_clock,
+                          "function": q.function} for q in g.lib.cells[cell].pins]}
     return {"schema": "sta_toy.bundle/1", "endpoint": e.name, "depth": depth,
             "max_nodes": max_nodes, "truncated": len(order) > max_nodes,
             "clock": {"name": g.sdc.clock_name, "period": num(g.sdc.period)},
             "nodes": [_node(n, cone[n]) for n in order[:max_nodes]],
             "edges": edges,
+            "instances": dict(sorted(instances.items())),
             "paths": found}
