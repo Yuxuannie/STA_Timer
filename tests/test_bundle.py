@@ -168,10 +168,11 @@ class ValueTests(unittest.TestCase):
         # Every instance in the cone or on a path, with its library pins in library order.
         b = bundle.debug_bundle(timed("s27", "s27"), "FF5/D", depth=1)
         self.assertEqual(sorted(b["instances"]), ["FF5", "U10", "U11", "U14", "U15", "U8", "U9"])
-        self.assertEqual(b["instances"]["FF5"], {"cell": "DFF", "pins": [
-            {"name": "CK", "direction": "input", "clock": True},
-            {"name": "D", "direction": "input", "clock": False},
-            {"name": "Q", "direction": "output", "clock": False}]})
+        self.assertEqual(b["instances"]["FF5"], {"cell": "DFF", "sequential": True, "pins": [
+            {"name": "CK", "direction": "input", "clock": True, "function": None},
+            {"name": "D", "direction": "input", "clock": False, "function": None},
+            {"name": "Q", "direction": "output", "clock": False, "function": "IQ"}]})
+        self.assertEqual(b["instances"]["U9"]["pins"][2]["function"], "!(A&B)")
         self.assertEqual([p["name"] for p in b["instances"]["U9"]["pins"]], ["A", "B", "Y"])
 
     def test_json(self):

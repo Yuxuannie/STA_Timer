@@ -247,7 +247,7 @@ class Timing:
 
 class Pin:
     def __init__(self, name, direction, capacitance, rise_capacitance, fall_capacitance,
-                 timings, line, is_clock):
+                 timings, line, is_clock, function=None):
         self.name = name
         self.direction = direction
         self.capacitance = capacitance
@@ -256,14 +256,18 @@ class Pin:
         self.timings = timings
         self.line = line
         self.is_clock = is_clock
+        self.function = function
 
 
 class Cell:
-    def __init__(self, name, pins, line, file):
+    """`sequential` is true for a cell with an `ff` or `latch` group."""
+
+    def __init__(self, name, pins, line, file, sequential=False):
         self.name = name
         self.pins = pins
         self.line = line
         self.file = file
+        self.sequential = sequential
 
     def pin(self, name):
         for p in self.pins:
@@ -352,7 +356,8 @@ class _Builder:
         pin_names = [n for g in group.find_groups("pin") for n in self.names(g)]
         pins = [self.pin(g, pin_name, "cell %s pin %s" % (name, pin_name), templates, pin_names)
                 for g in group.find_groups("pin") for pin_name in g.names]
-        return Cell(name, pins, group.line, self.filename)
+        sequential = bool(group.find_groups("ff") or group.find_groups("latch"))
+        return Cell(name, pins, group.line, self.filename, sequential)
 
     def pin(self, group, name, ctx, templates, pin_names):
         attr = self.first(group, "direction")
@@ -369,7 +374,8 @@ class _Builder:
             self.error(group, "%s: input pin has no capacitance" % ctx)
         timings = [self.timing(g, ctx, templates, pin_names) for g in group.find_groups("timing")]
         is_clock = self.text(group, "clock", "false") == "true"
-        return Pin(name, direction, caps[0], caps[1], caps[2], timings, group.line, is_clock)
+        return Pin(name, direction, caps[0], caps[1], caps[2], timings, group.line, is_clock,
+                   self.text(group, "function", None))
 
     def timing(self, group, ctx, templates, pin_names):
         attr = self.first(group, "related_pin")

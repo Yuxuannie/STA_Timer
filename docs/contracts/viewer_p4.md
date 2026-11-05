@@ -1,14 +1,17 @@
-# P4 viewer, v2 (contract)
+# P4 viewer, v3 (contract)
 
-A Tkinter debug viewer, standard library only, with one focus: the selected endpoint's worst
-path, drawn as **cells (modules) wired pin to pin**, with a stage table under it. v2 replaces
-the first viewer (endpoint Treeview, report text + timeline, name-box cone), which was
-judged cluttered.
+A Tkinter timing-debug workstation, standard library only: triage on the left (slack
+histogram, endpoint list), the selected endpoint's worst path in the centre (slack worked out
+term by term, three views of the path, the path table), and an inspector on the right that
+explains one pin (its values, the table lookup behind its delay, and which input and which
+fanout set its arrival and required time). v3 replaces v2 (schematic + stage table only), which
+the user judged ugly and not usable for debugging; references chosen by the user: Vivado path
+details, a Quartus-style waveform, a PrimeTime / Tempus workstation, PathView gate symbols.
 
 Tk is optional at import time: every module except `sta_toy/viewer/app.py` imports without
 `tkinter`, and the tests that need a window skip when a probe (`tkinter.Tk()` in a
 subprocess) fails, because some system Tk builds abort the process instead of raising
-`TclError`. On this machine Tk works under `~/.local/bin/python3.12` (Tk 9.0).
+`TclError`. On this Mac Tk works under `~/.local/bin/python3.12` (Tk 9.0).
 
 ## Start
 
@@ -26,13 +29,22 @@ inputs then outputs by name) and the status bar says so (`source.note`).
 ## Sources (`source.py`, no Tk)
 
 `EngineSource(lib_paths, verilog_path, sdc_path)` and `BundleSource(path)` answer the same
-questions: `rows()`, `summary(check)` (`None` in bundle mode), `paths(endpoint)` →
-`{"setup", "hold"}` path objects of `json_v1.md` (or `None`), `instance(inst)` → cell and
-library pins `{name, direction, clock}` in library order, `driver(pin)` (the net driver of an
-input pin, or `None`), `arrival(pin, check)` → `(AT, rf)` of the check's mode, worse
-transition, ties to `r`, `pin(name)` → AT / RAT / SLEW per mode and rf, setup and hold slack
-(minimum over rf), load when the pin drives a net; `arcs(inst)` → the instance's timing arcs
-with per-pair delays. Attributes `design_name`, `clock_name`, `period`, `mode`.
+questions:
+- `rows()`, `summary(check)` (`{wns, tns, nvp}`; `None` in bundle mode), `paths(endpoint)` →
+  `{"setup", "hold"}` path objects of `json_v1.md` (or `None`).
+- `instance(inst)` → `{cell, sequential, pins: [{name, direction, clock, function}]}` in
+  library order (`function` is the Liberty pin function or `None`).
+- `driver(pin)` (the net driver of an input pin, or `None`); `arrival(pin, check)` →
+  `(AT, rf)` of the check's mode, worse transition, ties to `r`; `pin(name)` → AT / RAT /
+  SLEW per mode and rf, setup and hold slack (minimum over rf), load when the pin drives a
+  net; `arcs(inst)` → the instance's timing arcs with per-pair delays.
+- `fanin(pin, check, rf)` (forward merge): every candidate arrival into `(pin, rf)` in the
+  check's mode, `{from, rf, kind, at, delay, value = at + delay, margin}`, the winner first
+  (late: largest, early: smallest; ties by pin, then `r` before `f`); `margin` = distance
+  from the winner. `fanout(pin, check, rf)` (backward merge): every candidate required time
+  from the pin's fanout, `{to, rf, kind, rat, delay, value = rat − delay, margin}`, the
+  binding one first (late: smallest, early: largest).
+- Attributes `design_name`, `clock_name`, `period`, `mode`, `note`.
 
 ## Model (`model.py`, no Tk)
 
@@ -43,9 +55,27 @@ with per-pair delays. Attributes `design_name`, `clock_name`, `period`, `mode`.
   (`input` / `clock` for the start, `net`, or `A→Y`-style for a cell arc), `rf` (`f`, or
   `f→r` across a cell), `delta` (row 0: the launch time, so the deltas add up to the
   arrival), `at`, `slew`, `share` (cell delta over the largest cell delta of the path).
-- `capture_rows(path)`: `{label, delta, value}` — clock edge, then clock latency, clock
-  uncertainty and library setup/hold time for a flop (or output delay for a port), then
-  required, arrival and slack (`slack (MET)` / `slack (VIOLATED)` by the report rule).
+- `capture_rows(path)`: `{label, delta, value}` — clock edge, clock latency, clock
+  uncertainty and library setup / hold time for a flop (or output delay for a port), then
+  required, arrival and slack.
+- `symbol(instance)`: the gate symbol from the output pin's function — `inv`, `buf`, `and`,
+  `nand`, `or`, `nor`, `xor`, `xnor`, `flop` (sequential cells) or `box`.
+- `summary(path)`: check, slack, arrival, required, edge, launch latency or input delay, ck→q,
+  data path, capture latency, library setup / hold, uncertainty, output delay, skew
+  (`L_capture − L_launch`, `None` from an input port), logic levels, start, end.
+- `formula(path)`: `{arrival: [(label, value)], required: [(label, signed value)], slack,
+  check}`; the terms add up to arrival and required; slack = required − arrival (setup) or
+  arrival − required (hold).
+- `histogram(values, bins=12)`: `{lo, hi, count}` bins of equal width over
+  `[min(values, 0), max(values, 0)]`, `None` skipped, the last bin closed.
+- `profile(path)`: one bar per stage on the time axis — the launch, then every cell arc —
+  `{label, kind, t0, t1, delay, index}`.
+- `path_table(path, source)`: three sections — "Source clock path" (or "Input"), "Data
+  path", "Destination clock path" (or "Output"); data rows carry `label, cell, arc, kind, rf,
+  load, slew_in, slew, incr, value` (AT), `rat`, `slack` (worst through the pin) and `index`.
+- `waveform(setup, hold, period, check)`: `{span, rows, marks}` — launch and capture clock
+  rows with their edges, the data row changing between the earliest (hold path) and latest
+  (setup path) arrival, and per check a mark with its window, required time, arrival and slack.
 - `schematic(path, source, expanded)`: the drawing, deterministic, pixel coordinates at zoom 1:
   - Grid of columns `W_MOD + GAP` wide. Lane 0 holds the path left to right, one element per
     column: a port for a PI start / PO end, a module per cell hop, the launch flop for a CK
@@ -61,30 +91,56 @@ with per-pair delays. Attributes `design_name`, `clock_name`, `period`, `mode`.
     overlap. Path wires carry `on_path`.
   - Stubs: every other module input is a stub with state `expand` (driver not drawn), `link`
     (driver already drawn: reconvergence, no duplicate), `none` (unconnected, or outside the
-    bundle) or `clock` (CK pins: `L <latency>`); with the driver name and the pin's arrival.
-  - Badges `AT rf` on the on-path output pins, the PI start and the endpoint.
+    bundle) or `clock` (CK pins, with the clock latency); each with the driver and the pin's
+    arrival.
+  - Badges `AT rf` on the on-path output pins (an input's AT equals its driver's).
 
 ## Window (`app.py`)
 
-`App(root, source, theme_name)`:
-- **Header**: endpoint, `SETUP|HOLD slack … MET|VIOLATED` chip, design and clock, SETUP / HOLD
-  toggle, previous / next endpoint, WNS / TNS / NVP of the check (engine mode), theme menu.
-- **Endpoints** (left): filter box and the `EndpointList` view; click to select.
-- **Schematic** (centre top): modules, ports, wires, stubs, badges; in each path module a
-  dashed in-cell arc `+delay`; the path in the accent colour; the selected pin ringed and the
-  selected hop (net wire or cell arc) in the focus colour. Click a pin → select it; a module
-  header → select the cell; ⊕ → expand; a link → select its driver. Drag to pan, wheel and
-  trackpad scroll, ⌘/Ctrl-wheel zoom, Fit (never below zoom 0.7: long paths are panned),
-  Collapse (drop the expansions of this endpoint and check).
-- **Stage table** (centre bottom): `#, PIN, CELL, ARC, RF, Δ, AT, SLEW` and a bar of `share`,
-  then the capture rows; click a row to select that pin.
-- **Inspector** (right): the selected pin (cell, direction, AT / RAT / SLEW late / early ×
-  r / f, setup and hold slack, load, driver) or cell (its arcs with late delays).
-- **Keys**: ←/→ step the signal pin to pin (auto-pans the schematic), ↑/↓ previous / next
-  endpoint, F fit.
-- Expansions are kept per (endpoint, check). Themes come from `theme.py` (`light`, `dark`,
-  `contrast`, identical keys) and switch at runtime by rebuilding the widgets; state is kept.
-- Only labels and canvases carry colours (Aqua ignores `tk.Button` colours); no images, no
-  threads, no other dependencies. Test hooks: `select_endpoint`, `set_check`, `expand`,
-  `step`, `select_stage`, `select_pin`, `select_cell`, `set_theme`, `set_zoom`, `fit`,
-  `collapse`; Tk callback errors are collected in `app.errors`.
+`App(root, source, theme_name)`, everything drawn on canvases:
+- **Header**: the left-panel toggle, `STA Timer`, design, clock and period; WNS / TNS / NVP
+  for setup and hold (engine mode; the worst slack only when the window is narrow; click to
+  switch check); the Setup / Hold toggle; the theme switch; the right-panel toggle.
+- **Left panel**: the slack histogram of the current check (click a bin to filter the list,
+  again to clear) and the endpoint list (filter box; endpoint, slack, start point, logic
+  levels; click to select).
+- **Summary**: endpoint, check, start point, logic levels, clock skew; the slack in large
+  type with MET / VIOLATED; then arrival and required as their terms (`formula`) and the slack
+  line, totals in one column. Terms that do not fit wrap onto an indented line, and the strip
+  grows to keep every line visible (its divider cannot hide them).
+- **Views** (tabs 1–3): *Schematic* — gates drawn from `symbol` (bubbles for inverting
+  cells, flops as boxes with a clock wedge), cells and wires neutral, only the critical path
+  (wires, leads, pins, AT badges) in the accent colour; each path cell's delay `+d` under it;
+  the selected pin ringed and the selected hop drawn in the focus colour; side-input labels
+  sit on the side away from the path. Click a pin → select it; a cell → the cell; ⊕ → expand;
+  ↺ → select the driver. Drag to pan, wheel / trackpad to scroll, ⌘/Ctrl-wheel or − / + to
+  zoom (shown in %), Fit (zoom 0.95–1.25: long paths are panned), Collapse; in a narrow centre
+  the zoom readout and then Fit give way to the tabs. *Waveform* — the
+  launch and capture clocks, the data at the endpoint (old → changing → new), the hold and
+  setup windows, both slacks as arrows. *Profile* — one bar per stage on the time axis, the
+  largest cell delay in the accent colour, arrival and required as lines.
+- **Path table**: `path_table` sections, columns `pin, cell, arc, rf, load, slew, incr, AT,
+  RAT, pin slack`, the data-path total, and the final slack; click a row to select the stage.
+- **Inspector** (right panel): for a pin — AT / RAT / slew (late / early × r / f), setup and
+  hold slack, load; for a path stage the lookup behind it (input slew and load → delay and
+  output slew; D slew and CK slew → t_setup / t_hold); "arrival set by" (`fanin`) and
+  "required set by" (`fanout`) with each candidate's expression and its margin to the winner
+  (red under 0.05); click a candidate to go there. For a cell — its arcs with late delays.
+- **Panels**: every divider can be dragged (side panels, histogram / list, summary / views /
+  table) down to the narrowest size whose columns still fit (left 280, centre 460, right
+  320 px); `[` and `]` or the header icons hide and show the left and right panels; sizes and
+  hidden panels survive a theme switch.
+- **Keys**: ←/→ step the signal pin to pin (the schematic follows), ↑/↓ previous / next
+  endpoint, S / H setup / hold, 1 / 2 / 3 views, F fit, [ / ] panels.
+- **Style**: one neutral palette and a single accent per theme (`light`, `dark`, `contrast`,
+  identical keys); green and red only on slack figures; hierarchy from type size, spacing and
+  hairlines (no bordered cards, pills or row rules). Words use the platform UI font (SF Pro on
+  macOS, via Tk's default font; elsewhere the `UI_FONTS` chain); every number uses the mono
+  chain so columns line up; small tracked capitals for section labels; one size scale
+  (9, 10–12, 13, 16–18, 28 pt).
+- Expansions are kept per (endpoint, check). Themes switch at runtime by rebuilding the
+  widgets; state is kept. Only canvases and frames carry colours (Aqua ignores `tk.Button`
+  colours); no images, no threads, no other dependencies. Test hooks: `select_endpoint`,
+  `set_check`, `set_tab`, `set_filter`, `filter_bin`, `next_endpoint`, `step`,
+  `select_stage`, `select_pin`, `select_cell`, `expand`, `collapse`, `set_zoom`, `fit`,
+  `set_theme`, `toggle_panel`; Tk callback errors are collected in `app.errors`.

@@ -37,9 +37,9 @@ the check arcs from that pin) when both ends are kept.
   "edges": [{"u": <src>, "v": <dst>, "kind": "net"|"cell"|"ckq"|"check",
              "delay": {"late": {"rr": .., "rf": .., "fr": .., "ff": ..}, "early": {...}},
              "check": {"setup": {"r": .., "f": ..}, "hold": {"r": .., "f": ..}}|null}],
-  "instances": {<inst>: {"cell": <cell>,
+  "instances": {<inst>: {"cell": <cell>, "sequential": bool,
                          "pins": [{"name": <pin>, "direction": "input"|"output",
-                                   "clock": bool}, ...]}},
+                                   "clock": bool, "function": <Liberty function>|null}, ...]}},
   "paths": [<path object of json_v1.md>, ...]
 }
 ```

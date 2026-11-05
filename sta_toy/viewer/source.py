@@ -5,7 +5,11 @@ which one they have:
   rows()               endpoint rows {pin, kind, setup_slack, hold_slack}
   summary(check)       {wns, tns, nvp} or None
   paths(endpoint)      {"setup": path object | None, "hold": ...} (json_v1.md)
-  instance(inst)       {"cell", "pins": [{"name", "direction", "clock"}]} in library order
+  instance(inst)       {"cell", "sequential", "pins": [{"name", "direction", "clock", "function"}]}
+                       in library order
+  fanin(pin, check, rf)   forward merge: every candidate arrival into (pin, rf), the winner first
+  fanout(pin, check, rf)  backward merge: every candidate required time from (pin, rf)'s fanout,
+                          the binding one first
   driver(pin)          the pin driving an input pin over a net, or None
   arrival(pin, check)  (AT, rf) of the check's mode, worst transition (ties to r), or None
   pin(name)            {"pin", "kind", "cell", "at", "rat", "slew", "slack", "load"} or None
@@ -19,6 +23,16 @@ from sta_toy import P2Error, design, paths, timer
 SCHEMA = "sta_toy.bundle/1"
 MODE = {"setup": "late", "hold": "early"}
 PAIRS = ("rr", "rf", "fr", "ff")
+
+
+def _merge(found, largest_first):
+    """Candidates ordered binding first (largest or smallest value; ties by pin and r before f),
+    each with `margin` = how far it is from the binding one (0 for the binding one)."""
+    found.sort(key=lambda c: ((-c["value"]) if largest_first else c["value"],
+                              c.get("from", c.get("to")), c["rf"] != "r"))
+    for c in found:
+        c["margin"] = abs(c["value"] - found[0]["value"])
+    return found
 
 
 def _worst(values, mode):
@@ -67,10 +81,35 @@ class EngineSource:
         return out
 
     def instance(self, inst):
-        cell = self._cells[inst]
-        return {"cell": cell, "pins": [{"name": p.name, "direction": p.direction,
-                                        "clock": p.is_clock}
-                                       for p in self.g.lib.cells[cell].pins]}
+        cell = self.g.lib.cells[self._cells[inst]]
+        return {"cell": cell.name, "sequential": cell.sequential,
+                "pins": [{"name": p.name, "direction": p.direction, "clock": p.is_clock,
+                          "function": p.function} for p in cell.pins]}
+
+    def fanin(self, pin, check, rf):
+        node, mode = self.g.by_name[pin], MODE[check]
+        found = []
+        for a in node.fanin:
+            for rf_u, rf_v in a.pairs:
+                at = a.src.at[mode][rf_u]
+                if rf_v == rf and at is not None:
+                    d = timer.arc_delay(a, mode, rf_u, rf)[0]
+                    found.append({"from": a.src.name, "rf": rf_u, "kind": a.kind, "at": at,
+                                  "delay": d, "value": at + d})
+        return _merge(found, mode == "late")
+
+    def fanout(self, pin, check, rf):
+        node, mode = self.g.by_name[pin], MODE[check]
+        found = []
+        if node.slew[mode][rf] is not None:
+            for a in node.fanout:
+                for rf_u, rf_v in a.pairs:
+                    rat = a.dst.rat[mode][rf_v]
+                    if rf_u == rf and rat is not None:
+                        d = timer.arc_delay(a, mode, rf, rf_v)[0]
+                        found.append({"to": a.dst.name, "rf": rf_v, "kind": a.kind, "rat": rat,
+                                      "delay": d, "value": rat - d})
+        return _merge(found, mode == "early")
 
     def driver(self, pin):
         node = self.g.by_name.get(pin)
@@ -193,7 +232,35 @@ class BundleSource:
         return {"setup": found.get("setup"), "hold": found.get("hold")}
 
     def instance(self, inst):
-        return self.data["instances"][inst]
+        info = self.data["instances"][inst]
+        return {"cell": info["cell"], "sequential": info.get("sequential", False),
+                "pins": [dict({"function": None}, **p) for p in info["pins"]]}
+
+    def fanin(self, pin, check, rf):
+        mode = MODE[check]
+        found = []
+        for e in self.data["edges"]:
+            if e["v"] != pin or e["kind"] == "check" or e["u"] not in self.nodes:
+                continue
+            for rf_u in ("r", "f"):
+                d, at = e["delay"][mode][rf_u + rf], self.nodes[e["u"]]["at"][mode][rf_u]
+                if d is not None and at is not None:
+                    found.append({"from": e["u"], "rf": rf_u, "kind": e["kind"], "at": at,
+                                  "delay": d, "value": at + d})
+        return _merge(found, mode == "late")
+
+    def fanout(self, pin, check, rf):
+        mode = MODE[check]
+        found = []
+        for e in self.data["edges"]:
+            if e["u"] != pin or e["kind"] == "check" or e["v"] not in self.nodes:
+                continue
+            for rf_v in ("r", "f"):
+                d, rat = e["delay"][mode][rf + rf_v], self.nodes[e["v"]]["rat"][mode][rf_v]
+                if d is not None and rat is not None:
+                    found.append({"to": e["v"], "rf": rf_v, "kind": e["kind"], "rat": rat,
+                                  "delay": d, "value": rat - d})
+        return _merge(found, mode == "early")
 
     def driver(self, pin):
         return self.drivers.get(pin)

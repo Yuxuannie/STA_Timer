@@ -107,8 +107,9 @@ def debug_bundle(g, endpoint_name, depth=3, max_nodes=300):
     for pin, cell in cells:
         if cell is not None and pin.split("/")[0] not in instances:
             instances[pin.split("/")[0]] = {
-                "cell": cell, "pins": [{"name": q.name, "direction": q.direction, "clock": q.is_clock}
-                                       for q in g.lib.cells[cell].pins]}
+                "cell": cell, "sequential": g.lib.cells[cell].sequential,
+                "pins": [{"name": q.name, "direction": q.direction, "clock": q.is_clock,
+                          "function": q.function} for q in g.lib.cells[cell].pins]}
     return {"schema": "sta_toy.bundle/1", "endpoint": e.name, "depth": depth,
             "max_nodes": max_nodes, "truncated": len(order) > max_nodes,
             "clock": {"name": g.sdc.clock_name, "period": num(g.sdc.period)},

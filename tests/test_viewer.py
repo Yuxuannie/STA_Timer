@@ -148,9 +148,8 @@ class SchematicTests(unittest.TestCase):
         self.assertEqual(len(set(p["y"] for e in sch["elements"] for p in e["pins"]
                                  if p["on_path"] and p["side"] == "in" or e["kind"] == "port")), 1)
         self.assertEqual([(s["pin"], s["state"], s["driver"], s["at"]) for s in sch["stubs"]],
-                         [("U2/A", "expand", "FF1/Q", "1.0000 r"), ("FF2/CK", "clock", None, "L 0.0000")])
-        self.assertEqual([b["text"] for b in sch["badges"]],
-                         ["0.5000 f", "2.0000 f", "4.0000 r", "4.0000 r"])
+                         [("U2/A", "expand", "FF1/Q", "1.0000 r"), ("FF2/CK", "clock", None, "0.0000")])
+        self.assertEqual([b["text"] for b in sch["badges"]], ["0.5000 f", "2.0000 f", "4.0000 r"])
         self.assertEqual([(w["from"], w["to"]) for w in sch["wires"]],
                          [("x", "U1/A"), ("U1/Y", "U2/B"), ("U2/Y", "FF2/D")])
 
@@ -216,10 +215,10 @@ class SourceTests(unittest.TestCase):
 
     def test_engine(self):
         src = engine("ff2_default", "ff2")
-        self.assertEqual(src.instance("FF1"), {"cell": "DFF", "pins": [
-            {"name": "CK", "direction": "input", "clock": True},
-            {"name": "D", "direction": "input", "clock": False},
-            {"name": "Q", "direction": "output", "clock": False}]})
+        self.assertEqual(src.instance("FF1"), {"cell": "DFF", "sequential": True, "pins": [
+            {"name": "CK", "direction": "input", "clock": True, "function": None},
+            {"name": "D", "direction": "input", "clock": False, "function": None},
+            {"name": "Q", "direction": "output", "clock": False, "function": "IQ"}]})
         self.assertEqual((src.driver("U2/A"), src.driver("FF1/CK"), src.driver("x")), ("FF1/Q", None, None))
         self.assertEqual(src.arrival("U2/Y", "setup"), (4.0, "r"))
         self.assertEqual(src.arrival("FF1/CK", "hold"), (0.0, "r"))
@@ -264,16 +263,29 @@ class SourceTests(unittest.TestCase):
         self.assertIn("written before cells were stored", old.note)
         # U10 is inside the depth-1 cone: all its pins. U9 is known only from path points
         # (U9/A is three cell arcs back), so it shows just B and Y.
-        self.assertEqual(old.instance("U10"), {"cell": "NOR2", "pins": [
-            {"name": "A", "direction": "input", "clock": False},
-            {"name": "B", "direction": "input", "clock": False},
-            {"name": "Y", "direction": "output", "clock": False}]})
+        self.assertEqual(old.instance("U10"), {"cell": "NOR2", "sequential": False, "pins": [
+            {"name": "A", "direction": "input", "clock": False, "function": None},
+            {"name": "B", "direction": "input", "clock": False, "function": None},
+            {"name": "Y", "direction": "output", "clock": False, "function": None}]})
         self.assertEqual([p["name"] for p in old.instance("U9")["pins"]], ["B", "Y"])
         self.assertEqual([(p["name"], p["direction"], p["clock"]) for p in old.instance("FF5")["pins"]],
                          [("CK", "input", True), ("D", "input", False)])
         sch = model.schematic(old.paths("FF5/D")["setup"], old, ["U9/A"])
         self.assertEqual([e["name"] for e in sch["elements"]][:8],
                          ["G0", "U14", "U8", "U15", "U9", "U11", "U10", "FF5"])
+
+    def test_merges(self):
+        src = engine("s27", "s27")
+        # U9/Y falls: B and A rise at 4.44; A's slew 0.054 vs B's 0.056 -> 2.0 x 0.002 = 0.004.
+        fanin = src.fanin("U9/Y", "setup", "f")
+        self.assertEqual([(c["from"], c["rf"], fmt4(c["value"]), fmt4(c["margin"])) for c in fanin],
+                         [("U9/B", "r", "6.4520", "0.0000"), ("U9/A", "r", "6.4480", "0.0040")])
+        # U14/Y drives U8/A (RAT 2.5706) and U10/A (RAT 9.0222): the smaller one binds (golden pins.tsv).
+        fanout = src.fanout("U14/Y", "setup", "r")
+        self.assertEqual([(c["to"], fmt4(c["value"])) for c in fanout], [("U8/A", "2.5706"), ("U10/A", "9.0222")])
+        self.assertEqual(fmt4(fanout[1]["margin"]), "6.4516")
+        hold = src.fanin("U9/Y", "hold", "f")
+        self.assertEqual(hold[0]["value"], min(c["value"] for c in hold))
 
     def test_bundle_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,6 +298,80 @@ class SourceTests(unittest.TestCase):
                 with self.assertRaises(P2Error) as cm:
                     BundleSource(os.path.join(tmp, name))
                 self.assertIn(message, cm.exception.message)
+
+
+class ViewModelTests(unittest.TestCase):
+    """R28: the v3 views — symbols, summary, formula, histogram, profile, path table, waveform."""
+
+    def test_symbols(self):
+        src = engine("s27", "s27")
+        self.assertEqual([model.symbol(src.instance(i)) for i in ("U14", "U8", "U15", "U9", "U10", "FF5")],
+                         ["inv", "and", "or", "nand", "nor", "flop"])
+        pin = lambda f: {"sequential": False, "pins": [{"direction": "output", "function": f}]}
+        self.assertEqual([model.symbol(pin(f)) for f in ("A", "!(A&B&C)", "A^B", "!(A^B)", "(A&B)|C", None)],
+                         ["buf", "nand", "xor", "xnor", "box", "box"])
+
+    def test_summary_and_formula(self):
+        # ff2_skew FF2/D hold: L_launch 0, ck->q 1.0, NAND 2.0, L_capture 0.5, t_hold 0.1 (DFF table).
+        src = engine("ff2_skew", "ff2")
+        hold = src.paths("FF2/D")["hold"]
+        s = model.summary(hold)
+        self.assertEqual((s["ckq"], s["data_path"], s["skew"], s["levels"]), (1.0, 2.0, 0.5, 1))
+        f = model.formula(hold)
+        self.assertEqual([(n, fmt4(v)) for n, v in f["arrival"]],
+                         [("L_launch", "0.0000"), ("ck→q", "1.0000"), ("data path", "2.0000")])
+        self.assertEqual([(n, fmt4(v)) for n, v in f["required"]],
+                         [("edge", "0.0000"), ("L_capture", "0.5000"), ("t_hold", "0.1000"), ("unc_hold", "0.0000")])
+        self.assertEqual(fmt4(sum(v for _, v in f["required"])), fmt4(hold["required"]))
+        setup = model.formula(engine("s27", "s27").paths("FF5/D")["setup"])
+        self.assertEqual([n for n, _ in setup["arrival"]], ["input delay", "data path"])
+        self.assertEqual(fmt4(sum(v for _, v in setup["arrival"])), "8.6849")
+        self.assertEqual(fmt4(sum(v for _, v in setup["required"])), "9.8222")
+
+    def test_histogram(self):
+        bins = model.histogram([-0.3, 2.7, 1.0, None], bins=3)
+        self.assertEqual([(fmt4(b["lo"]), fmt4(b["hi"]), b["count"]) for b in bins],
+                         [("-0.3000", "0.7000", 1), ("0.7000", "1.7000", 1), ("1.7000", "2.7000", 1)])
+        self.assertEqual(model.histogram([None]), [])
+
+    def test_profile(self):
+        path = engine("s27", "s27").paths("FF5/D")["setup"]
+        bars = model.profile(path)
+        self.assertEqual([b["label"] for b in bars[:3]], ["input delay", "U14 INV A→Y", "U8 AND2 A→Y"])
+        self.assertEqual(fmt4(bars[4]["delay"]), "2.0120")
+        self.assertEqual(fmt4(sum(b["delay"] for b in bars)), fmt4(path["arrival"]))
+
+    def test_path_table(self):
+        src = engine("s27", "s27")
+        pins = golden("s27", "pins.tsv")
+        sections = model.path_table(src.paths("FF5/D")["setup"], src)
+        self.assertEqual([s["title"] for s in sections], ["Input", "Data path", "Destination clock path"])
+        for r in sections[1]["rows"]:
+            rf = r["rf"][-1]
+            self.assertEqual(fmt4(r["rat"]), pins[r["label"]]["rat_late_" + rf])
+            self.assertEqual(fmt4(r["slack"]), fmt4(r["rat"] - r["value"]))
+        self.assertEqual(fmt4(sections[1]["rows"][0]["slack"]), "0.3706")   # G0: worse path to G17
+        self.assertEqual([r["label"] for r in sections[2]["rows"]],
+                         ["clock clk (rise edge)", "clock latency", "FF5/CK", "clock uncertainty",
+                          "library setup time"])
+        flop = model.path_table(engine("ff2_default", "ff2").paths("FF2/D")["hold"], engine("ff2_default", "ff2"))
+        self.assertEqual([r["label"] for r in flop[0]["rows"]], ["clock clk (rise edge)", "clock latency (ideal)", "FF1/CK"])
+
+    def test_waveform(self):
+        src = engine("ff2_skew", "ff2")
+        p = src.paths("FF2/D")
+        wave = model.waveform(p["setup"], p["hold"], src.period, "hold")
+        rows = dict((r["name"], r) for r in wave["rows"])
+        self.assertEqual((rows["launch clock"]["pin"], rows["capture clock"]["edges"]), ("FF1/CK", [0.5, 10.5]))
+        data = [r for r in wave["rows"] if r["kind"] == "data"][0]
+        self.assertEqual((data["early"], data["late"]), (3.0, 4.0))
+        marks = dict((m["kind"], m) for m in wave["marks"])
+        self.assertEqual(tuple(fmt4(v) for v in marks["hold"]["window"]), ("0.5000", "0.6000"))
+        self.assertEqual(tuple(fmt4(v) for v in marks["setup"]["window"]), ("10.2000", "10.5000"))
+        self.assertEqual((marks["setup"]["slack"], marks["hold"]["slack"]), (6.2, 2.4))
+        self.assertLessEqual(wave["span"][0], 0.0)
+        setup_view = model.waveform(p["setup"], p["hold"], src.period, "setup")
+        self.assertEqual(setup_view["rows"][0]["pin"], "x")
 
 
 class ThemeTests(unittest.TestCase):
@@ -371,29 +457,40 @@ class TkSmokeTests(unittest.TestCase):
     def tearDown(self):
         self.root.destroy()
 
+    def texts(self, canvas):
+        return [canvas.itemcget(i, "text") for i in canvas.find_all() if canvas.type(i) == "text"]
+
     def test_engine_mode_in_every_theme(self):
         for name in theme.NAMES:
             app = self.App(self.root, engine("s27", "s27"), name)
             self.assertEqual(app.endpoint, "G17")                       # worst setup first
             app.select_endpoint("FF5/D")
-            rows = len(model.stages(app.path())) + len(model.capture_rows(app.path()))
-            self.assertEqual(len(app.table.find_withtag("all")) > rows, True)
+            self.assertIn("1.1373", self.texts(app.summary_cv))
+            self.assertIn("9.8222", self.texts(app.summary_cv))       # required in the formula
+            for tab in ("schematic", "waveform", "profile"):
+                app.set_tab(tab)
+                self.assertTrue(app.view.find_all(), tab)
+            app.set_tab("schematic")
             app.expand("U9/A")
             app.set_check("hold")
             app.set_check("setup")
             self.assertEqual(app.expansions[("FF5/D", "setup")], ["U9/A"])   # kept per check
             app.step(-1)
             self.assertEqual(app.selected, "U10/Y")              # FF5/D <- U10/Y over the net
-            app.select_pin("U15/Y")
-            self.assertIn("U15/Y", app.inspector.get("1.0", "end"))
+            app.select_pin("U9/Y")
+            insp = self.texts(app.insp)
+            self.assertIn("U9/Y", insp)
+            self.assertTrue(any("U9/A" in t for t in insp))     # the losing input of the merge
             app.select_cell("U9")
-            self.assertIn("NAND2", app.inspector.get("1.0", "end"))
+            self.assertTrue(any("NAND2" in t for t in self.texts(app.insp)))
+            app.filter_bin(0)
+            app.filter_bin(0)
             app.set_zoom(1.5)
             app.fit()
             app.select_endpoint("G17")
             app.set_check("hold")                                        # no hold path
             self.assertIsNone(app.layout)
-            self.assertTrue(app.sch.find_all())
+            self.assertTrue(app.view.find_all())
             app.set_theme("dark")
             self.assertEqual(app.errors, [], name)
 
@@ -407,6 +504,34 @@ class TkSmokeTests(unittest.TestCase):
         self.assertEqual(app.endpoint, "FF2/D")
         app.expand("U2/A")
         self.assertTrue(any(e["name"] == "FF1" for e in app.layout["elements"]))
+        self.assertEqual(app.errors, [])
+
+    def test_no_label_overlaps(self):
+        """Every endpoint, check, view and path stage, with every side input expanded once:
+        no two texts on one canvas overlap (1 px tolerance across, 2 px down)."""
+        app = self.App(self.root, engine("s27", "s27"), "light")
+        self.root.geometry("1520x940")
+        self.root.update()
+        canvases = (app.header, app.hist, app.plist, app.summary_cv, app.tabs, app.view, app.table, app.insp)
+        for row in app.endpoints.rows:
+            for check in ("setup", "hold"):
+                app.select_endpoint(row["pin"])
+                app.set_check(check)
+                for stub in [s["pin"] for s in app.layout["stubs"] if s["state"] == "expand"] if app.layout else []:
+                    app.expand(stub)
+                for tab in ("schematic", "waveform", "profile"):
+                    app.set_tab(tab)
+                    for k in range(len(app.path()["points"])) if app.path() else [None]:
+                        if k is not None:
+                            app.select_stage(k)
+                        for cv in canvases:
+                            boxes = [(cv.itemcget(i, "text"), cv.bbox(i)) for i in cv.find_all()
+                                     if cv.type(i) == "text" and cv.itemcget(i, "text").strip()]
+                            for n, (ta, a) in enumerate(boxes):
+                                for tb, b in boxes[n + 1:]:
+                                    self.assertFalse(a[0] + 1 < b[2] - 1 and b[0] + 1 < a[2] - 1 and
+                                                     a[1] + 2 < b[3] - 2 and b[1] + 2 < a[3] - 2,
+                                                     (row["pin"], check, tab, k, ta, tb))
         self.assertEqual(app.errors, [])
 
 

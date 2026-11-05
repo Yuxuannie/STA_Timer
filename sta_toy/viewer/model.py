@@ -1,5 +1,8 @@
-"""Viewer model without Tk (R28, viewer_p4.md): the endpoint list, a path's stages pin to
-pin, its capture rows, and the path schematic with cells drawn as modules on a grid."""
+"""Viewer model without Tk (R28, viewer_p4.md): the endpoint list and slack histogram, a
+path's summary, formula terms, three-section path table, stage profile and waveform, its
+stages pin to pin, and the path schematic with cells drawn as gates on a grid."""
+
+import re
 
 from sta_toy.tsv import fmt4
 
@@ -247,25 +250,21 @@ class _Layout:
                     arrival = self.source.arrival(p["pin"], self.check)
                     out.append({"pin": p["pin"], "x": p["x"], "y": p["y"], "state": "clock",
                                 "driver": None,
-                                "at": "L %s" % fmt4(arrival[0]) if arrival else None})
+                                "at": fmt4(arrival[0]) if arrival else None})
         return out
 
     def badges(self, pts):
         out = []
-        end = pts[-1]["pin"]
         for e in self.elements:
             for p in e["pins"]:
                 point = self.points.get(p["pin"])
                 if point is None or not p["on_path"]:
                     continue
-                if p["side"] == "out" or p["pin"] == end:
-                    text = "%s %s" % (fmt4(point["at"]), point["rf"])
-                    if p["pin"] == end:
-                        out.append({"pin": p["pin"], "x": p["x"] - 8, "y": p["y"] + 7,
-                                    "anchor": "ne", "text": text})
-                    else:
-                        out.append({"pin": p["pin"], "x": p["x"] + 8, "y": p["y"] - 6,
-                                    "anchor": "sw", "text": text})
+                # Output pins only: an input's AT equals its driver's (nets are ideal). Below the
+                # wire in the left part of the gap; side-input labels sit above it, on the right.
+                if p["side"] == "out":
+                    out.append({"pin": p["pin"], "x": p["x"] + 8, "y": p["y"] + 8, "anchor": "nw",
+                                "text": "%s %s" % (fmt4(point["at"]), point["rf"])})
         return out
 
 
@@ -306,3 +305,175 @@ def schematic(path, source, expanded=()):
     height = max(e["y1"] for e in lay.elements) + MARGIN_Y
     return {"elements": lay.elements, "wires": lay.wires, "stubs": stubs, "badges": badges,
             "expanded": applied, "bbox": (0, 0, width, height)}
+
+
+# ---------------------------------------------------------------------------------- v3 views
+
+def symbol(instance):
+    """Gate symbol of an instance from its output function: inv, buf, and, nand, or, nor,
+    xor, xnor, flop, or box when the function is missing or more complex."""
+    if instance.get("sequential"):
+        return "flop"
+    outs = [p for p in instance["pins"] if p["direction"] == "output"]
+    f = re.sub(r"\s+", "", (outs[0].get("function") or "") if len(outs) == 1 else "")
+    neg = f.startswith("!(") and f.endswith(")")
+    body = f[2:-1] if neg else f
+    name = r"[A-Za-z_][A-Za-z0-9_]*"
+    if re.match(r"^!%s$" % name, f) or re.match(r"^%s'$" % name, f):
+        return "inv"
+    if re.match(r"^%s$" % name, f):
+        return "buf"
+    for op, kind in (("&", "and"), ("*", "and"), ("|", "or"), ("+", "or"), ("^", "xor")):
+        if re.match(r"^%s(\%s%s)+$" % (name, op, name), body):
+            return ("n" + kind if kind != "xor" else "xnor") if neg else kind
+    return "box"
+
+
+def summary(path):
+    """The numbers of the summary card and of the slack formula (walkthrough §9)."""
+    pts, launch, cap = path["points"], path["launch"], path["capture"]
+    ckq = pts[1]["incr"] if launch["latency"] is not None and len(pts) > 1 else None
+    start = launch["latency"] if launch["latency"] is not None else (launch["input_delay"] or 0.0)
+    data = path["arrival"] - start - (ckq or 0.0)
+    skew = None
+    if cap["latency"] is not None and launch["latency"] is not None:
+        skew = cap["latency"] - launch["latency"]
+    return {"check": path["check"], "slack": path["slack"], "arrival": path["arrival"],
+            "required": path["required"], "edge": cap["clock_edge"],
+            "launch_latency": launch["latency"], "input_delay": launch["input_delay"],
+            "ckq": ckq, "data_path": data, "capture_latency": cap["latency"],
+            "library": cap["check"], "uncertainty": cap["uncertainty"],
+            "output_delay": cap["output_delay"], "skew": skew,
+            "levels": sum(1 for q in pts if q["arc"] == "cell"),
+            "start": path["start"], "end": path["end"]}
+
+
+def formula(path):
+    """Walkthrough §9 as two term lists: arrival = sum(arrival terms), required = sum(required
+    terms); each term (label, signed value). slack = required - arrival (setup) or
+    arrival - required (hold)."""
+    s = summary(path)
+    setup = s["check"] == "setup"
+    arrival = ([("L_launch", s["launch_latency"]), ("ck→q", s["ckq"])] if s["launch_latency"] is not None
+               else [("input delay", s["input_delay"] or 0.0)]) + [("data path", s["data_path"])]
+    if s["library"] is not None:
+        u = "unc_setup" if setup else "unc_hold"
+        t = "t_setup" if setup else "t_hold"
+        sign = -1.0 if setup else 1.0
+        required = [("T" if setup else "edge", s["edge"]), ("L_capture", s["capture_latency"]),
+                    (t, sign * s["library"]), (u, sign * s["uncertainty"])]
+    else:
+        required = [("T" if setup else "edge", s["edge"]), ("output delay", s["required"] - s["edge"])]
+    return {"arrival": arrival, "required": required, "slack": s["slack"], "check": s["check"]}
+
+
+def histogram(values, bins=12):
+    """Bins {lo, hi, count} over [min(values, 0), max(values, 0)] of equal width; None values
+    are skipped. The last bin includes its upper edge."""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return []
+    lo, hi = min(vals + [0.0]), max(vals + [0.0])
+    if hi == lo:
+        hi = lo + 1.0
+    width = (hi - lo) / bins
+    out = [{"lo": lo + i * width, "hi": lo + (i + 1) * width, "count": 0} for i in range(bins)]
+    for v in vals:
+        out[min(bins - 1, int((v - lo) / width))]["count"] += 1
+    return out
+
+
+def profile(path):
+    """One bar per path stage on the time axis: the launch (clock latency or input delay)
+    and every cell arc, each {label, kind, t0, t1, delay, index}."""
+    pts = path["points"]
+    s = summary(path)
+    bars = [{"label": "clock latency" if s["launch_latency"] is not None else "input delay",
+             "kind": "launch", "t0": 0.0, "t1": pts[0]["at"], "delay": pts[0]["at"], "index": 0}]
+    for k, q in enumerate(pts):
+        if q["arc"] in ("cell", "ckq"):
+            bars.append({"label": "%s %s %s→%s" % (q["pin"].split("/")[0], q["cell"],
+                                                   _short(pts[k - 1]["pin"]), _short(q["pin"])),
+                         "kind": q["arc"], "t0": pts[k - 1]["at"], "t1": q["at"],
+                         "delay": q["incr"], "index": k})
+    return bars
+
+
+def path_table(path, source):
+    """The path in three sections (Vivado style): source clock path, data path, destination
+    clock path. Data rows carry the pin's AT, RAT and slack of the check's mode, its load and
+    slews (walkthrough §10); `index` is the path point. Clock rows have no pin values."""
+    pts, check = path["points"], path["check"]
+    mode = MODE[check]
+    s = summary(path)
+    clock = path["launch_clock"]
+    src = [{"label": "clock %s (rise edge)" % clock, "incr": 0.0, "value": 0.0}]
+    if s["launch_latency"] is not None:
+        src.append({"label": "clock latency (ideal)", "incr": s["launch_latency"], "value": s["launch_latency"]})
+        src.append({"label": pts[0]["pin"], "cell": pts[0]["cell"], "value": pts[0]["at"], "rf": "r",
+                    "index": 0})
+        first = 1
+    else:
+        src.append({"label": "input delay", "incr": s["input_delay"] or 0.0, "value": pts[0]["at"]})
+        first = 0
+    data = []
+    for k in range(first, len(pts)):
+        q = pts[k]
+        info = source.pin(q["pin"]) or {}
+        rat = info.get("rat", {}).get(mode, {}).get(q["rf"]) if info else None
+        slack = None if rat is None else (rat - q["at"] if check == "setup" else q["at"] - rat)
+        if k == 0:
+            arc = "input"
+        elif q["arc"] == "net":
+            arc = "net"
+        else:
+            arc = "%s→%s" % (_short(pts[k - 1]["pin"]), _short(q["pin"]))
+        data.append({"label": q["pin"], "cell": q["cell"], "arc": arc, "kind": q["arc"],
+                     "rf": q["rf"] if q["arc"] not in ("cell", "ckq") else "%s→%s" % (pts[k - 1]["rf"], q["rf"]),
+                     "load": q["cap"], "slew_in": pts[k - 1]["slew"] if q["arc"] in ("cell", "ckq") else None,
+                     "slew": q["slew"], "incr": q["incr"], "value": q["at"], "rat": rat, "slack": slack,
+                     "index": k})
+    dst = []
+    for r in capture_rows(path)[:-3]:
+        dst.append({"label": r["label"], "incr": r["delta"], "value": r["value"]})
+    cap = path["capture"]
+    if cap["pin"] is not None:
+        dst.insert(2, {"label": cap["pin"], "cell": cap["cell"], "value": dst[1]["value"], "rf": "r"})
+    return [{"title": "Source clock path" if s["launch_latency"] is not None else "Input", "rows": src},
+            {"title": "Data path", "rows": data},
+            {"title": "Destination clock path" if cap["pin"] is not None else "Output", "rows": dst}]
+
+
+def waveform(setup, hold, period, check="setup"):
+    """Walkthrough §6 for one endpoint, in time units: the launch and capture clock edges, the
+    data at the endpoint changing between the earliest (hold path) and latest (setup path)
+    arrival, the setup and hold windows, and both slacks. `setup` / `hold` are path objects
+    (either may be None); the launch row follows the path of `check` (the two worst paths may
+    start at different points). Returns {"span": (t0, t1), "rows": [...], "marks": [...]}."""
+    any_path = (setup if check == "setup" else hold) or setup or hold
+    s_any = summary(any_path)
+    launch_l = s_any["launch_latency"]
+    cap_l = s_any["capture_latency"]
+    edges = [0.0, period]
+    launch = [e + (launch_l or 0.0) for e in edges]
+    capture = [e + (cap_l or 0.0) for e in edges]
+    rows = [{"kind": "clock", "name": "launch clock" + ("" if launch_l is not None else " (input port)"),
+             "pin": any_path["start"], "edges": launch, "period": period},
+            {"kind": "clock", "name": "capture clock", "pin": any_path["capture"]["pin"] or any_path["end"],
+             "edges": capture, "period": period}]
+    early = hold["arrival"] if hold else None
+    late = setup["arrival"] if setup else None
+    rows.append({"kind": "data", "name": "data @ %s" % any_path["end"], "early": early, "late": late})
+    marks = []
+    if hold:
+        marks.append({"kind": "hold", "window": (hold["capture"]["clock_edge"] + (cap_l or 0.0), hold["required"]),
+                      "required": hold["required"], "arrival": hold["arrival"], "slack": hold["slack"]})
+    if setup:
+        marks.append({"kind": "setup", "window": (setup["required"], setup["capture"]["clock_edge"] + (cap_l or 0.0)),
+                      "required": setup["required"], "arrival": setup["arrival"], "slack": setup["slack"]})
+    times = launch + capture + [t for t in (early, late) if t is not None]
+    for m in marks:
+        times += list(m["window"]) + [m["required"], m["arrival"]]
+    span = (min(times + [0.0]), max(times))
+    pad = (span[1] - span[0]) * 0.04 or 1.0
+    return {"span": (span[0] - pad, span[1] + pad), "rows": rows, "marks": marks}
