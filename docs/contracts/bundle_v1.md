@@ -37,6 +37,9 @@ the check arcs from that pin) when both ends are kept.
   "edges": [{"u": <src>, "v": <dst>, "kind": "net"|"cell"|"ckq"|"check",
              "delay": {"late": {"rr": .., "rf": .., "fr": .., "ff": ..}, "early": {...}},
              "check": {"setup": {"r": .., "f": ..}, "hold": {"r": .., "f": ..}}|null}],
+  "instances": {<inst>: {"cell": <cell>,
+                         "pins": [{"name": <pin>, "direction": "input"|"output",
+                                   "clock": bool}, ...]}},
   "paths": [<path object of json_v1.md>, ...]
 }
 ```
@@ -51,3 +54,6 @@ the check arcs from that pin) when both ends are kept.
   listed in graph order.
 - `paths` = the endpoint's worst setup path then worst hold path (those that exist),
   ids `"setup"` and `"hold"`.
+- `instances` = every instance with a kept node or a point on one of the paths, sorted by
+  name, with its cell and all its library signal pins in library order (so a viewer can
+  draw the cell as a module with every pin).

@@ -164,6 +164,16 @@ class ValueTests(unittest.TestCase):
         self.assertEqual(self.b["paths"], expected)
         self.assertEqual([(p["start"], p["slack"]) for p in self.b["paths"]], [("x", 5.7), ("FF1/CK", 2.9)])
 
+    def test_instances(self):
+        # Every instance in the cone or on a path, with its library pins in library order.
+        b = bundle.debug_bundle(timed("s27", "s27"), "FF5/D", depth=1)
+        self.assertEqual(sorted(b["instances"]), ["FF5", "U10", "U11", "U14", "U15", "U8", "U9"])
+        self.assertEqual(b["instances"]["FF5"], {"cell": "DFF", "pins": [
+            {"name": "CK", "direction": "input", "clock": True},
+            {"name": "D", "direction": "input", "clock": False},
+            {"name": "Q", "direction": "output", "clock": False}]})
+        self.assertEqual([p["name"] for p in b["instances"]["U9"]["pins"]], ["A", "B", "Y"])
+
     def test_json(self):
         for b in (self.b, bundle.debug_bundle(timed("s27", "s27"), "FF5/D")):
             self.assertEqual(json.loads(json.dumps(b)), b)
