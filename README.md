@@ -66,13 +66,19 @@ The viewer needs a Python with a working Tk. On this Mac the system `/usr/bin/py
     ~/.local/bin/python3.12 -m sta_toy.viewer --lib data/toy2.lib --verilog data/s27.v --sdc data/sdc/s27.sdc --theme dark
     ~/.local/bin/python3.12 -m sta_toy.viewer --bundle out/FF5_D.json
 
-Debugging an endpoint: the left list has every endpoint, worst slack first for the check
-chosen in the header (SETUP / HOLD), violations in red. The centre shows that endpoint's
-worst path as cells (modules with all their pins) wired pin to pin in orange, each cell with
-its in-cell arc and `+delay`, each output with its arrival; under it the stage table lists the
-path pin by pin (arc, transition, Δ, AT, slew, a bar for the cell delay) and then the capture
-side down to required time and slack. ←/→ walk the signal pin to pin (the schematic follows),
-↑/↓ change endpoint. A side input ends in ⊕: click it to draw the cell driving it (and keep
-digging backwards); ↺ marks a side input whose driver is already on screen. Click a pin or a
-cell header for its AT / RAT / slew / slack or its arcs in the inspector. Themes: light,
-dark, contrast (header menu or `--theme`).
+Debugging an endpoint: on the left, the slack histogram of the check chosen in the header
+(Setup / Hold; click a bar to filter) and every endpoint, worst slack first. The centre opens
+with the endpoint's slack worked out term by term (input delay or launch latency + ck→q + data
+path = arrival; edge + capture latency − setup time − uncertainty = required, or + hold time +
+uncertainty for hold), then three
+views of the worst path: *Schematic* (gate symbols wired pin to pin, the critical path in the
+accent colour, each cell's `+delay`, each output's arrival), *Waveform* (both clocks, the data
+window, the setup and hold windows and slacks) and *Profile* (where the path spends its time),
+and under them the path table in three sections (source clock, data path, destination clock)
+with load, slew, incr, AT, RAT and pin slack. ←/→ walk the signal pin to pin, ↑/↓ change
+endpoint, S / H the check, 1 / 2 / 3 the view. A side input ends in ⊕: click it to draw the
+cell driving it (and keep digging backwards); ↺ marks a side input whose driver is already on
+screen. Click a pin: the inspector shows its AT / RAT / slew, the lookup behind its delay
+(input slew and load → delay) and which input set its arrival and which fanout set its
+required time, with each loser's margin. Drag any divider to resize; `[` and `]` hide the side
+panels. Themes: light, dark, contrast (header switch or `--theme`).
