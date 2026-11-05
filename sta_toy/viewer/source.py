@@ -35,6 +35,7 @@ class EngineSource:
     """Runs the engine once on a design."""
 
     mode = "engine"
+    note = None
 
     def __init__(self, lib_paths, verilog_path, sdc_path):
         lib, netlist, linked = design.load(lib_paths, verilog_path)
@@ -111,6 +112,45 @@ class EngineSource:
         return out
 
 
+def _infer_instances(data):
+    """Instances of a bundle written before "instances" existed, rebuilt from its nodes, edges
+    and path points: only the pins it mentions, inputs then outputs, each by name."""
+    cell, direction, clock = {}, {}, {}
+    for n in data["nodes"]:
+        if "/" in n["pin"]:
+            cell[n["pin"].split("/")[0]] = n["cell"]
+            if n["kind"] in ("CK", "D"):
+                direction[n["pin"]] = "input"
+                clock[n["pin"]] = n["kind"] == "CK"
+    for e in data["edges"]:
+        if e["kind"] == "net":
+            direction[e["v"]] = "input"
+            direction[e["u"]] = "output"
+        else:
+            direction[e["u"]] = "input"
+            direction[e["v"]] = "input" if e["kind"] == "check" else "output"
+            if e["kind"] in ("ckq", "check"):
+                clock[e["u"]] = True
+    for p in data["paths"]:
+        for q in p["points"]:
+            if q["cell"] is None:
+                continue
+            cell[q["pin"].split("/")[0]] = q["cell"]
+            direction[q["pin"]] = "output" if q["arc"] in ("cell", "ckq") else "input"
+            if q["arc"] == "start":
+                clock[q["pin"]] = True
+    out = {}
+    for pin, d in direction.items():
+        if "/" not in pin:
+            continue
+        inst, name = pin.split("/")
+        out.setdefault(inst, {"cell": cell.get(inst), "pins": []})["pins"].append(
+            {"name": name, "direction": d, "clock": clock.get(pin, False)})
+    for info in out.values():
+        info["pins"].sort(key=lambda p: (p["direction"] != "input", p["name"]))
+    return out
+
+
 class BundleSource:
     """One saved bundle: only its endpoint is listed, and only its cone can be expanded."""
 
@@ -128,8 +168,11 @@ class BundleSource:
             raise P2Error(None, None, "%s is not JSON" % path)
         if not isinstance(data, dict) or data.get("schema") != SCHEMA:
             raise P2Error(None, None, "%s is not a %s bundle" % (path, SCHEMA))
+        self.note = None
         if "instances" not in data:
-            raise P2Error(None, None, "%s has no instances; write it again with --bundle" % path)
+            data["instances"] = _infer_instances(data)
+            self.note = ("This bundle was written before cells were stored: cells show only the "
+                         "pins it mentions. Write it again with --bundle for full cells.")
         self.data = data
         self.design_name = data["endpoint"]
         self.clock_name = data["clock"]["name"]

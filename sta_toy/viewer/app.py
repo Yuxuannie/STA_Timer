@@ -179,7 +179,8 @@ class App:
         self.inspector.configure(state="disabled")
         body.add(right, minsize=240, width=300, stretch="never")
 
-        self.status = self._label(root, HINT, font="small", fg="faint", anchor="w", padx=16, pady=5)
+        self.status = self._label(root, self.source.note or HINT, font="small",
+                                  fg="accent_ink" if self.source.note else "faint", anchor="w", padx=16, pady=5)
         self.status.grid(row=2, column=0, sticky="ew")
         self._fitted = False
 

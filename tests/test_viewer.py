@@ -251,15 +251,38 @@ class SourceTests(unittest.TestCase):
                 b.instance(q["pin"].split("/")[0])
         self.assertIsNone(b.summary("setup"))
 
+    def test_bundle_without_instances(self):
+        # A bundle written before "instances" existed still loads; its cells show the pins it mentions.
+        src = engine("s27", "s27")
+        b = bundle.debug_bundle(src.g, "FF5/D", depth=1)
+        del b["instances"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "old.json")
+            with open(path, "w") as f:
+                json.dump(b, f)
+            old = BundleSource(path)
+        self.assertIn("written before cells were stored", old.note)
+        # U10 is inside the depth-1 cone: all its pins. U9 is known only from path points
+        # (U9/A is three cell arcs back), so it shows just B and Y.
+        self.assertEqual(old.instance("U10"), {"cell": "NOR2", "pins": [
+            {"name": "A", "direction": "input", "clock": False},
+            {"name": "B", "direction": "input", "clock": False},
+            {"name": "Y", "direction": "output", "clock": False}]})
+        self.assertEqual([p["name"] for p in old.instance("U9")["pins"]], ["B", "Y"])
+        self.assertEqual([(p["name"], p["direction"], p["clock"]) for p in old.instance("FF5")["pins"]],
+                         [("CK", "input", True), ("D", "input", False)])
+        sch = model.schematic(old.paths("FF5/D")["setup"], old, ["U9/A"])
+        self.assertEqual([e["name"] for e in sch["elements"]][:8],
+                         ["G0", "U14", "U8", "U15", "U9", "U11", "U10", "FF5"])
+
     def test_bundle_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cases = {"x.json": "{not json", "y.json": '{"schema": "x"}',
-                     "z.json": '{"schema": "sta_toy.bundle/1"}'}
+            cases = {"x.json": "{not json", "y.json": '{"schema": "x"}'}
             for name, text in cases.items():
                 with open(os.path.join(tmp, name), "w") as f:
                     f.write(text)
             for name, message in (("x.json", "is not JSON"), ("y.json", "is not a sta_toy.bundle/1 bundle"),
-                                  ("z.json", "has no instances"), ("missing.json", "cannot read")):
+                                  ("missing.json", "cannot read")):
                 with self.assertRaises(P2Error) as cm:
                     BundleSource(os.path.join(tmp, name))
                 self.assertIn(message, cm.exception.message)

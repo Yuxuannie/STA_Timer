@@ -17,9 +17,11 @@ python -m sta_toy.viewer --lib LIB [--lib LIB ...] --verilog TOP.v --sdc FILE.sd
 python -m sta_toy.viewer --bundle FILE.json [--theme NAME]
 ```
 `NAME` is `light` (default), `dark` or `contrast`. Errors follow `cli_p2.md`: one stderr line,
-exit 1 (argument errors, unreadable / non-JSON / wrong-schema bundles, bundles without
-`instances`, engine errors with the CLI's messages, no tkinter). Bundle mode lists only the
-bundle's endpoint and can expand only inside its cone.
+exit 1 (argument errors, unreadable / non-JSON / wrong-schema bundles, engine errors with the
+CLI's messages, no tkinter). Bundle mode lists only the bundle's endpoint and can expand only
+inside its cone. A bundle written before `instances` existed still loads: each instance's
+pins are rebuilt from the bundle's nodes, edges and path points (only the pins it mentions,
+inputs then outputs by name) and the status bar says so (`source.note`).
 
 ## Sources (`source.py`, no Tk)
 
