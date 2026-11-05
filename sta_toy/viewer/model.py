@@ -1,130 +1,308 @@
-"""Viewer model without Tk (R28, viewer_p4.md "Model"): the endpoint table, the path
-timeline, the cone layout and the node details, all from bundle_v1.md / json_v1.md data."""
+"""Viewer model without Tk (R28, viewer_p4.md): the endpoint list, a path's stages pin to
+pin, its capture rows, and the path schematic with cells drawn as modules on a grid."""
 
-from sta_toy import timer
 from sta_toy.tsv import fmt4
 
-COLUMNS = ("pin", "kind", "setup_slack", "hold_slack")
+MODE = {"setup": "late", "hold": "early"}
+
+# Schematic grid (pixels at zoom 1).
+W_MOD, W_PORT, H_PORT = 132, 60, 28
+GAP, PITCH, HEAD, PAD = 120, 28, 30, 10
+LANE_GAP, STUB, MARGIN_X, MARGIN_Y = 46, 22, 110, 60
 
 
-class EndpointTable:
-    """Endpoint rows {pin, kind, setup_slack, hold_slack} with sort, filter and paging."""
+class EndpointList:
+    """Rows {pin, kind, setup_slack, hold_slack}: worst first for the current check
+    (undefined slack last, ties by pin), filtered by a case-insensitive substring."""
 
     def __init__(self, rows):
         self.rows = list(rows)
-        self.column, self.descending, self.text = "pin", False, ""
-
-    @classmethod
-    def from_graph(cls, g):
-        """Rows of a timed graph: the slack at the worst transition, None if undefined."""
-        rows = []
-        for e in g.endpoints:
-            row = {"pin": e.name, "kind": e.kind}
-            for check in ("setup", "hold"):
-                rf = timer.worst_rf(e, check)
-                row[check + "_slack"] = None if rf is None else timer.slack(e, check, rf)
-            rows.append(row)
-        return cls(rows)
-
-    @classmethod
-    def from_bundle(cls, b):
-        """The one row of a bundle: its endpoint node's own slacks."""
-        node = [n for n in b["nodes"] if n["pin"] == b["endpoint"]][0]
-        return cls([{"pin": node["pin"], "kind": node["kind"],
-                     "setup_slack": node["slack"]["setup"], "hold_slack": node["slack"]["hold"]}])
-
-    def sort(self, column, descending=False):
-        self.column, self.descending = column, descending
-
-    def filter(self, text):
-        self.text = text
+        self.check = "setup"
+        self.text = ""
 
     def view(self):
-        """All rows after filter and sort: None last in either direction, ties by pin."""
-        text = self.text.lower()
-        rows = sorted((r for r in self.rows if text in r["pin"].lower()), key=lambda r: r["pin"])
-        known = [r for r in rows if r[self.column] is not None]
-        known.sort(key=lambda r: r[self.column], reverse=self.descending)  # stable: pin order kept
-        return known + [r for r in rows if r[self.column] is None]
+        key = self.check + "_slack"
+        rows = [r for r in self.rows if self.text.lower() in r["pin"].lower()]
+        return sorted(rows, key=lambda r: (r[key] is None, r[key] or 0.0, r["pin"]))
 
-    def page(self, n, size=50):
-        return self.view()[n * size:(n + 1) * size]
+    def neighbour(self, pin, step):
+        """The pin `step` rows away from `pin` in view(), wrapping; the first shown row if
+        `pin` is not shown; None if nothing is shown."""
+        pins = [r["pin"] for r in self.view()]
+        if not pins:
+            return None
+        if pin not in pins:
+            return pins[0]
+        return pins[(pins.index(pin) + step) % len(pins)]
 
-    def pages(self, size=50):
-        return max(1, (len(self.view()) + size - 1) // size)
+
+def _short(pin):
+    return pin.split("/")[-1]
 
 
-def timeline(path, width, margin=40):
-    """Drawing items {kind, x0, x1, label} of one json_v1.md path object (x in pixels)."""
-    launch, cap = path["launch"], path["capture"]
-    latency = cap["latency"] or 0.0
-    times = [p["at"] for p in path["points"]]
-    lo = min([0.0, launch["clock_edge"], path["required"], cap["clock_edge"] + latency] + times)
-    hi = max(cap["clock_edge"] + latency, path["required"], path["arrival"])
-    scale = (width - 2 * margin) / (hi - lo) if hi > lo else 0.0
-
-    def item(kind, t0, t1, label):
-        return {"kind": kind, "x0": margin + (t0 - lo) * scale, "x1": margin + (t1 - lo) * scale,
-                "label": label}
-
-    items = [item("launch_edge", launch["clock_edge"], launch["clock_edge"],
-                  "launch edge %s" % fmt4(launch["clock_edge"])),
-             item("capture_edge", cap["clock_edge"], cap["clock_edge"],
-                  "capture edge %s" % fmt4(cap["clock_edge"])),
-             item("arrival", path["arrival"], path["arrival"], "arrival %s" % fmt4(path["arrival"])),
-             item("required", path["required"], path["required"],
-                  "required %s" % fmt4(path["required"])),
-             item("data", times[0], path["arrival"],
-                  "data %s -> %s" % (fmt4(times[0]), fmt4(path["arrival"])))]
-    if cap["pin"] is not None:
-        if path["check"] == "setup":
-            t0, t1 = path["required"], cap["clock_edge"] + latency
+def stages(path):
+    """One row per path point (json_v1.md path object), pin to pin. Row 0's delta is its
+    launch time (input delay or clock latency), so the deltas add up to the arrival; `share`
+    is a cell row's delta over the largest cell delay of the path."""
+    pts = path["points"]
+    rows = []
+    for k, p in enumerate(pts):
+        if k == 0:
+            arc, rf, delta = ("input" if p["cell"] is None else "clock"), p["rf"], p["at"]
+        elif p["arc"] == "net":
+            arc, rf, delta = "net", p["rf"], p["incr"]
         else:
-            t0, t1 = latency, path["required"]
-        items.append(item("window", t0, t1, "%s window %s -> %s" % (path["check"], fmt4(t0), fmt4(t1))))
-    return items
+            arc = "%s→%s" % (_short(pts[k - 1]["pin"]), _short(p["pin"]))
+            rf, delta = "%s→%s" % (pts[k - 1]["rf"], p["rf"]), p["incr"]
+        rows.append({"index": k, "pin": p["pin"], "cell": p["cell"], "kind": p["arc"],
+                     "arc": arc, "rf": rf, "delta": delta, "at": p["at"], "slew": p["slew"]})
+    big = max([r["delta"] for r in rows if r["kind"] in ("cell", "ckq")] or [0.0])
+    for r in rows:
+        r["share"] = r["delta"] / big if big > 0 and r["kind"] in ("cell", "ckq") else 0.0
+    return rows
 
 
-def _spread(n, lo, hi):
-    """n positions evenly spaced from lo to hi (one in the middle)."""
-    if n == 1:
-        return [(lo + hi) / 2.0]
-    return [lo + i * (hi - lo) / (n - 1) for i in range(n)]
+def capture_rows(path):
+    """The requirement side of a path as rows {label, delta, value}: clock edge, then
+    latency, uncertainty and library time (flop) or output delay (port), then required,
+    arrival and slack. Values are the rounded numbers of the path object."""
+    cap, check = path["capture"], path["check"]
+    value = cap["clock_edge"]
+    rows = [{"label": "clock %s (rise edge)" % path["capture_clock"], "delta": None, "value": value}]
+    if cap["pin"] is not None:
+        sign = -1.0 if check == "setup" else 1.0
+        value += cap["latency"]
+        rows.append({"label": "clock latency", "delta": cap["latency"], "value": value})
+        value += sign * cap["uncertainty"]
+        rows.append({"label": "clock uncertainty", "delta": sign * cap["uncertainty"], "value": value})
+        rows.append({"label": "library %s time" % check, "delta": sign * cap["check"],
+                     "value": path["required"]})
+    else:
+        rows.append({"label": "output delay", "delta": path["required"] - value,
+                     "value": path["required"]})
+    met = not fmt4(path["slack"]).startswith("-")
+    rows += [{"label": "required", "delta": None, "value": path["required"]},
+             {"label": "arrival", "delta": None, "value": path["arrival"]},
+             {"label": "slack (MET)" if met else "slack (VIOLATED)", "delta": None,
+              "value": path["slack"]}]
+    return rows
 
 
-def cone_layout(bundle, width, height, margin=40):
-    """{"nodes": {pin: (x, y)}, "edges": [(u, v, kind, on_path)], "path_pins": set}."""
-    columns = {}
-    for n in bundle["nodes"]:
-        columns.setdefault(n["depth"], []).append(n["pin"])
-    deepest = max(columns)
-    xs = [width - margin] if deepest == 0 else _spread(deepest + 1, width - margin, margin)
-    nodes = {}
-    for depth, pins in columns.items():
-        for pin, y in zip(sorted(pins), _spread(len(pins), margin, height - margin)):
-            nodes[pin] = (xs[depth], y)
-    steps, path_pins = set(), set()
-    for p in bundle["paths"]:
-        pins = [q["pin"] for q in p["points"]]
-        path_pins.update(pins)
-        steps.update(zip(pins, pins[1:]))
-    edges = [(e["u"], e["v"], e["kind"], (e["u"], e["v"]) in steps) for e in bundle["edges"]]
-    return {"nodes": nodes, "edges": edges, "path_pins": path_pins}
+def _col_x(col):
+    return col * (W_MOD + GAP)
 
 
-def _cell(v):
-    return fmt4(v).rjust(10)
+class _Layout:
+    """Builds the schematic of one path; see schematic()."""
+
+    def __init__(self, path, source):
+        self.source = source
+        self.check = path["check"]
+        self.points = {p["pin"]: p for p in path["points"]}
+        self.elements = []
+        self.by_pin = {}          # pin -> (element, pin record), for every drawn pin
+        self.wires = []
+        self.fed = set()          # side inputs wired to an expanded driver
+        self.top = 0.0            # smallest y0 placed so far
+        self.bottom = 0.0         # largest y1 placed so far
+
+    def module(self, inst, col, path_in=None, path_out=None):
+        info = self.source.instance(inst)
+        ins = [p for p in info["pins"] if p["direction"] == "input"]
+        outs = [p for p in info["pins"] if p["direction"] == "output"]
+        n = max(len(ins), len(outs), 1)
+        e = {"kind": "module", "name": inst, "cell": info["cell"], "col": col,
+             "w": W_MOD, "h": HEAD + n * PITCH + PAD, "xoff": 0, "pins": [], "arc": None}
+        for i, p in enumerate(ins):
+            e["pins"].append(self._pin(inst + "/" + p["name"], p["name"], "in", p["clock"],
+                                       0, HEAD + (i + 0.5) * PITCH, path_in))
+        off = (n - len(outs)) * PITCH / 2.0
+        for j, p in enumerate(outs):
+            e["pins"].append(self._pin(inst + "/" + p["name"], p["name"], "out", False,
+                                       W_MOD, HEAD + off + (j + 0.5) * PITCH, path_out))
+        return e
+
+    def port(self, name, col, direction):
+        drives = direction == "in"
+        e = {"kind": "port", "name": name, "cell": None, "col": col, "direction": direction,
+             "w": W_PORT, "h": H_PORT, "xoff": W_MOD - W_PORT if drives else 0, "arc": None,
+             "pins": [self._pin(name, name, "out" if drives else "in", False,
+                                W_PORT if drives else 0, H_PORT / 2.0, name)]}
+        e["pins"][0]["on_path"] = name in self.points
+        return e
+
+    def _pin(self, full, name, side, clock, dx, dy, on):
+        return {"pin": full, "name": name, "side": side, "clock": clock, "dx": dx, "dy": dy,
+                "on_path": full == on}
+
+    def place(self, e, y0):
+        e.setdefault("lane", 0)
+        e["x0"] = _col_x(e["col"]) + e["xoff"]
+        e["y0"] = y0
+        for p in e["pins"]:
+            p["x"], p["y"] = e["x0"] + p["dx"], y0 + p["dy"]
+            if p["on_path"] or p["pin"] not in self.by_pin:
+                self.by_pin[p["pin"]] = (e, p)
+        self.top = min(self.top, y0)
+        self.bottom = max(self.bottom, y0 + e["h"])
+        self.elements.append(e)
+
+    def place_on_path(self, e, anchor):
+        """Lane 0: shift vertically so the on-path pin `anchor` sits on the baseline y = 0."""
+        dy = [p["dy"] for p in e["pins"] if p["pin"] == anchor][0]
+        self.place(e, -dy)
+
+    def wire(self, a, b, bend, on_path):
+        (xa, ya), (xb, yb) = self.xy(a), self.xy(b)
+        points = [(xa, ya), (xb, yb)] if ya == yb else [(xa, ya), (bend, ya), (bend, yb), (xb, yb)]
+        self.wires.append({"from": a, "to": b, "points": points, "on_path": on_path})
+
+    def xy(self, pin):
+        p = self.by_pin[pin][1]
+        return p["x"], p["y"]
+
+    def path(self, pts):
+        col, k = 0, 0
+        if pts[0]["cell"] is None:
+            e = self.port(pts[0]["pin"], 0, "in")
+            self.place_on_path(e, pts[0]["pin"])
+            prev, k = pts[0]["pin"], 1
+        else:                                   # launched by a flop: CK -> Q is its first hop
+            inst = pts[0]["pin"].split("/")[0]
+            e = self.module(inst, 0, pts[0]["pin"], pts[1]["pin"])
+            e["arc"] = (pts[0]["pin"], pts[1]["pin"], pts[1]["incr"])
+            self.place_on_path(e, pts[0]["pin"])
+            prev, k = pts[1]["pin"], 2
+        while k < len(pts):
+            p = pts[k]
+            col += 1
+            if p["cell"] is None:
+                e = self.port(p["pin"], col, "out")
+                k += 1
+            elif k + 1 < len(pts) and pts[k + 1]["arc"] in ("cell", "ckq"):
+                e = self.module(p["pin"].split("/")[0], col, p["pin"], pts[k + 1]["pin"])
+                e["arc"] = (p["pin"], pts[k + 1]["pin"], pts[k + 1]["incr"])
+                k += 2
+            else:                               # the capture flop's D pin
+                e = self.module(p["pin"].split("/")[0], col, p["pin"])
+                k += 1
+            self.place_on_path(e, p["pin"])
+            self.wire(prev, p["pin"], _col_x(col) - GAP / 2.0, True)
+            prev = e["arc"][1] if e["arc"] else None
+
+    def side_inputs(self):
+        for e in self.elements:
+            for p in e["pins"]:
+                if p["side"] == "in" and not p["on_path"] and not p["clock"] \
+                        and e["kind"] == "module":
+                    yield e, p
+
+    def expand(self, pin, count):
+        """Draw the driver of side input `pin`: one column left of its consumer, in a new lane
+        on the consumer's side of the path (above for a pin above the path line or a lane
+        above it, else below), so expansion wires never cross the path."""
+        shown = dict((p["pin"], (e, p)) for e, p in self.side_inputs())
+        if pin not in shown or pin in self.fed:
+            return False
+        driver = self.source.driver(pin)
+        if driver is None or driver in self.by_pin:
+            return False
+        consumer, p = shown[pin]
+        up = consumer["lane"] > 0 or (consumer["lane"] == 0 and p["y"] < 0)
+        col = consumer["col"] - 1
+        if "/" in driver:
+            e = self.module(driver.split("/")[0], col)
+        else:
+            e = self.port(driver, col, "in")
+        if up:
+            e["lane"] = 1 + max([x["lane"] for x in self.elements] + [0])
+            self.place(e, self.top - LANE_GAP - e["h"])
+        else:
+            e["lane"] = -1 + min([x["lane"] for x in self.elements] + [0])
+            self.place(e, self.bottom + LANE_GAP)
+        bend = _col_x(col) + W_MOD + GAP / 2.0 - 10 * ((count - 1) % 4 + 1)
+        self.wire(driver, pin, bend, False)
+        self.fed.add(pin)
+        return True
+
+    def stubs(self):
+        out = []
+        for e, p in self.side_inputs():
+            if p["pin"] in self.fed:
+                continue
+            driver = self.source.driver(p["pin"])
+            arrival = self.source.arrival(p["pin"], self.check)
+            stub = {"pin": p["pin"], "x": p["x"], "y": p["y"], "driver": driver,
+                    "at": "%s %s" % (fmt4(arrival[0]), arrival[1]) if arrival else None}
+            if driver is None:
+                stub["state"] = "none"
+            elif driver in self.by_pin:          # reconvergence: the driver is already drawn
+                stub["state"] = "link"
+            else:
+                stub["state"] = "expand"
+            out.append(stub)
+        for e in self.elements:
+            for p in e["pins"]:
+                if p["clock"]:
+                    arrival = self.source.arrival(p["pin"], self.check)
+                    out.append({"pin": p["pin"], "x": p["x"], "y": p["y"], "state": "clock",
+                                "driver": None,
+                                "at": "L %s" % fmt4(arrival[0]) if arrival else None})
+        return out
+
+    def badges(self, pts):
+        out = []
+        end = pts[-1]["pin"]
+        for e in self.elements:
+            for p in e["pins"]:
+                point = self.points.get(p["pin"])
+                if point is None or not p["on_path"]:
+                    continue
+                if p["side"] == "out" or p["pin"] == end:
+                    text = "%s %s" % (fmt4(point["at"]), point["rf"])
+                    if p["pin"] == end:
+                        out.append({"pin": p["pin"], "x": p["x"] - 8, "y": p["y"] + 7,
+                                    "anchor": "ne", "text": text})
+                    else:
+                        out.append({"pin": p["pin"], "x": p["x"] + 8, "y": p["y"] - 6,
+                                    "anchor": "sw", "text": text})
+        return out
 
 
-def node_details(bundle, pin):
-    """Text lines for one bundle node: kind, cell, depth, cap, AT / RAT / SLEW, slacks."""
-    n = [n for n in bundle["nodes"] if n["pin"] == pin][0]
-    lines = ["kind: %s" % n["kind"], "cell: %s" % (n["cell"] or "-"), "depth: %d" % n["depth"],
-             "cap: %s" % fmt4(n["cap"]),
-             "".ljust(6) + "".join(c.rjust(10) for c in ("late r", "late f", "early r", "early f"))]
-    for key in ("at", "rat", "slew"):
-        lines.append(key.upper().ljust(6) + "".join(_cell(n[key][m][rf])
-                                                    for m in timer.MODES for rf in ("r", "f")))
-    lines.append("setup slack: %s" % fmt4(n["slack"]["setup"]))
-    lines.append("hold slack: %s" % fmt4(n["slack"]["hold"]))
-    return lines
+def schematic(path, source, expanded=()):
+    """The path's cells as modules (json_v1.md path object, source = viewer source).
+
+    Lane 0 holds the path left to right, one element per grid column, each module shifted so
+    its on-path input pin is on the baseline. Each side input in `expanded` (in order) adds
+    its driver in a new lane outside every lane on its side of the path, one column left of
+    the consumer; a side input whose driver is already drawn is shown as a link instead.
+    Wires bend only in column gaps, so no wire crosses a box and no two boxes overlap.
+    Returns {"elements", "wires", "stubs", "badges", "expanded" (the expansions applied),
+    "bbox"} with coordinates shifted so the drawing starts at (MARGIN_X, MARGIN_Y)."""
+    lay = _Layout(path, source)
+    lay.path(path["points"])
+    applied = []
+    for pin in expanded:
+        if lay.expand(pin, len(applied) + 1):
+            applied.append(pin)
+    stubs, badges = lay.stubs(), lay.badges(path["points"])
+    dx = MARGIN_X - min(e["x0"] for e in lay.elements)
+    dy = MARGIN_Y - min(e["y0"] for e in lay.elements)
+    for e in lay.elements:
+        e["x0"] += dx
+        e["y0"] += dy
+        e["x1"], e["y1"] = e["x0"] + e["w"], e["y0"] + e["h"]
+        for p in e["pins"]:
+            p["x"] += dx
+            p["y"] += dy
+        if e["arc"]:
+            e["arc"] = {"from": e["arc"][0], "to": e["arc"][1], "delay": e["arc"][2]}
+    for w in lay.wires:
+        w["points"] = [(x + dx, y + dy) for x, y in w["points"]]
+    for item in stubs + badges:
+        item["x"] += dx
+        item["y"] += dy
+    width = max(e["x1"] for e in lay.elements) + MARGIN_X
+    height = max(e["y1"] for e in lay.elements) + MARGIN_Y
+    return {"elements": lay.elements, "wires": lay.wires, "stubs": stubs, "badges": badges,
+            "expanded": applied, "bbox": (0, 0, width, height)}

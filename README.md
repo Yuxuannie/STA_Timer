@@ -63,14 +63,16 @@ Rules: `docs/contracts/report_p3.md`, `json_v1.md`, `bundle_v1.md`, `viewer_p4.m
 The viewer needs a Python with a working Tk. On this Mac the system `/usr/bin/python3`
 (Tk 8.5) aborts when it opens a window; `~/.local/bin/python3.12` (Tk 9.0) works:
 
-    ~/.local/bin/python3.12 -m sta_toy.viewer --lib data/toy2.lib --verilog data/s27.v --sdc data/sdc/s27.sdc
+    ~/.local/bin/python3.12 -m sta_toy.viewer --lib data/toy2.lib --verilog data/s27.v --sdc data/sdc/s27.sdc --theme dark
     ~/.local/bin/python3.12 -m sta_toy.viewer --bundle out/FF5_D.json
 
-Debugging an endpoint: the table (top) lists every endpoint with its setup and hold slack,
-worst setup first, violations in red; click a heading to sort, type in the filter box to
-narrow it. Selecting a row shows, for the chosen check (setup / hold), the full path report
-and a timeline of launch edge, data arrival, required time and the setup or hold window;
-the cone view draws the endpoint's fan-in cone by depth with the worst path in bold
-orange, each box giving AT / RAT / slack, and clicking a box lists all its AT / RAT /
-SLEW values and its fan-in edges. Raise the depth or max-nodes and press reload to look
-further back.
+Debugging an endpoint: the left list has every endpoint, worst slack first for the check
+chosen in the header (SETUP / HOLD), violations in red. The centre shows that endpoint's
+worst path as cells (modules with all their pins) wired pin to pin in orange, each cell with
+its in-cell arc and `+delay`, each output with its arrival; under it the stage table lists the
+path pin by pin (arc, transition, Δ, AT, slew, a bar for the cell delay) and then the capture
+side down to required time and slack. ←/→ walk the signal pin to pin (the schematic follows),
+↑/↓ change endpoint. A side input ends in ⊕: click it to draw the cell driving it (and keep
+digging backwards); ↺ marks a side input whose driver is already on screen. Click a pin or a
+cell header for its AT / RAT / slew / slack or its arcs in the inspector. Themes: light,
+dark, contrast (header menu or `--theme`).

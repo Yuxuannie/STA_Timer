@@ -28,8 +28,8 @@ R23 | sta_toy/report.py | format_path, report_timing | test_report.GoldenReportT
 R24 | sta_toy/paths.py, sta_toy/report.py | summary, format_summary | test_paths.SummaryTests, test_report.SummaryTextTests, test_cli_p3.ReportCliTests.test_summary
 R25 | sta_toy/jsonout.py | units, report_json, dumps, write | test_json.SchemaTests, test_json.GoldenTests, test_json.OutputTests; test_cli_p3.FileOutputTests
 R26 | sta_toy/__main__.py | arguments, run, main | test_cli_p3 (ReportCliTests, FileOutputTests, OptionErrorTests); test_cli.CliTests
-R27 | sta_toy/bundle.py | debug_bundle | test_bundle.ConeTests, test_bundle.ValueTests
-R28 | sta_toy/viewer/model.py, sta_toy/viewer/source.py | EndpointTable, timeline, cone_layout, node_details; EngineSource, BundleSource | test_viewer: EndpointTableTests, TimelineTests, ConeLayoutTests, NodeDetailsTests, SourceTests
+R27 | sta_toy/bundle.py | debug_bundle | test_bundle.ConeTests, test_bundle.ValueTests (incl. test_instances); test_viewer.SourceTests.test_bundle_matches_engine
+R28 | sta_toy/viewer/model.py, sta_toy/viewer/source.py, sta_toy/viewer/theme.py | EndpointList, stages, capture_rows, schematic; EngineSource, BundleSource; THEMES, pick_font | test_viewer: EndpointListTests, StageTests, CaptureRowTests, SchematicTests (incl. test_geometry_everywhere), SourceTests, ThemeTests
 R29 | sta_toy/viewer/app.py, sta_toy/viewer/__main__.py | App, main | test_viewer.TkSmokeTests (skips without a working Tk), test_viewer.ViewerCliTests
 R30 | tests/test_paths.py, tests/test_report.py, tests/test_json.py, tests/test_bundle.py, tests/test_viewer.py, tests/test_cli_p3.py, tests/golden/reports/ | - | -
 R31 | README.md, TRACE.md, DECISIONS.md, SPEC_P3P4.md | - | -

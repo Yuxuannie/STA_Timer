@@ -17,8 +17,8 @@ as it is: every earlier test passes and no P2 input, golden or contract changes.
 | R25 | JSON report schema v1 | `sta_toy/jsonout.py` |
 | R26 | CLI options of `cli_p3.md` | `sta_toy/__main__.py` |
 | R27 | Debug bundle v1 | `sta_toy/bundle.py` |
-| R28 | Viewer model without Tk: endpoint table, timeline, cone layout, node details, sources | `sta_toy/viewer/model.py`, `sta_toy/viewer/source.py` |
-| R29 | Tk window: endpoints / path / cone views, in-process and bundle modes | `sta_toy/viewer/app.py`, `sta_toy/viewer/__main__.py` |
+| R28 | Viewer model without Tk (v2): endpoint list, pin-to-pin stages, capture rows, path schematic with cells as modules, sources, themes | `sta_toy/viewer/model.py`, `sta_toy/viewer/source.py`, `sta_toy/viewer/theme.py` |
+| R29 | Tk window (v2): header, endpoint list, path schematic, stage table, inspector, switchable themes; engine and bundle modes | `sta_toy/viewer/app.py`, `sta_toy/viewer/__main__.py` |
 | R30 | Tests for R21–R29 | `tests/test_paths.py`, `test_report.py`, `test_json.py`, `test_bundle.py`, `test_viewer.py`, `test_cli_p3.py` |
 | R31 | Docs: README, TRACE, DECISIONS | — |
 
@@ -48,11 +48,12 @@ bundle.debug_bundle(g, endpoint_name, depth=3, max_nodes=300) -> dict
 
 viewer.source.EngineSource(lib_paths, verilog_path, sdc_path)   # raises StaError subclasses
 viewer.source.BundleSource(path)                                # raises P2Error
+  (v2: rows, summary, paths, instance, driver, arrival, pin, arcs — viewer_p4.md "Sources")
   .rows() -> [{pin, kind, setup_slack, hold_slack}]
   .bundle(endpoint, depth=3, max_nodes=300) -> dict
   .clock_name, .mode ("engine" | "bundle")
-viewer.model.EndpointTable / timeline / cone_layout / node_details   (viewer_p4.md)
-viewer.app.App(root, source)
+viewer.model.EndpointList / stages / capture_rows / schematic         (viewer_p4.md v2)
+viewer.app.App(root, source, theme_name="light")
 python -m sta_toy.viewer ...                                    (viewer_p4.md "Start")
 ```
 
