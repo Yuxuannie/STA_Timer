@@ -1,6 +1,6 @@
 """CLI: python -m sta_toy --lib <file> [--lib <file> ...] --verilog <file> [--sdc <file>
 <outputs>] (R6; --sdc and --dump-tsv from R18, cli_p2.md; reports, JSON and bundles
-from R26, cli_p3.md; --check-timing from R35, cli_p5.md)."""
+from R26, cli_p3.md; --check-timing from R35 and --trace from R36, cli_p5.md)."""
 
 import re
 import sys
@@ -9,11 +9,11 @@ from sta_toy import P2Error, StaError, design, tsv, writer
 
 VALUE_OPTIONS = ("--lib", "--verilog", "--sdc", "--dump-tsv", "--path-delay", "--from", "--to",
                  "--through", "--max-paths", "--nworst", "--json", "--bundle", "--bundle-out",
-                 "--depth", "--max-nodes")
+                 "--depth", "--max-nodes", "--trace")
 FLAGS = ("--report-timing", "--report-summary", "--transition-time", "--capacitance",
          "--check-timing")
 OUTPUTS = ("--dump-tsv", "--report-timing", "--report-summary", "--json", "--bundle",
-           "--check-timing")
+           "--check-timing", "--trace")
 NEEDS = {"--path-delay": "--report-timing", "--from": "--report-timing", "--to": "--report-timing",
          "--through": "--report-timing", "--max-paths": "--report-timing",
          "--nworst": "--report-timing", "--transition-time": "--report-timing",
@@ -78,9 +78,10 @@ def run(args):
     lib, netlist, linked = design.load(args["--lib"], args["--verilog"])
     if "--sdc" not in args:
         return writer.write(linked), None
-    from sta_toy import bundle, checks, jsonout, paths, report
+    from sta_toy import bundle, checks, jsonout, paths, report, trace
     grid = [] if "--check-timing" in args else None
-    g = design.timed(lib, netlist, linked, args["--sdc"], grid=grid)
+    log = [] if "--trace" in args else None
+    g = design.timed(lib, netlist, linked, args["--sdc"], grid=grid, log=log)
     text = ""
     if "--report-timing" in args:
         check = "setup" if args.get("--path-delay", "max") == "max" else "hold"
@@ -92,6 +93,8 @@ def run(args):
         text += report.format_summary(paths.summary(g))
     if "--check-timing" in args:
         text += checks.report(g, grid)
+    if "--trace" in args:
+        text += trace.trace(g, args["--trace"], log, args["--sdc"])
     files = []
     if "--json" in args:
         info = {"name": netlist.name, "libs": args["--lib"], "verilog": args["--verilog"],
