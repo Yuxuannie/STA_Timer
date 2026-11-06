@@ -174,9 +174,15 @@ class ErrorContractTests(TempDirTest):
         self.assertEqual(text.count("timing_type : rising_edge;"), 1)
         lib = self.write("falling.lib", text.replace("timing_type : rising_edge;",
                                                      "timing_type : falling_edge;"))
+        # R35 (cli_p5.md): no longer an error; the arc is ignored, counted and listed.
         result = self.timing(FF2_V, CLOCK, lib=lib)
-        self.assertOneLineError(result, r"^%s:\d+: cell DFF pin Q: unsupported timing_type falling_edge\n$"
-                                % re.escape(lib))
+        self.assertEqual((result.returncode, result.stdout), (0, b""))
+        self.assertEqual(result.stderr, b"warning: 2 timing arcs ignored (run --check-timing)\n")
+        result = run_cli("--lib", lib, "--verilog", FF2_V, "--sdc", os.path.join(self.tmp, "c.sdc"),
+                         "--check-timing")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b"\nignored timing arcs: 2\n  DFF Q CK falling_edge 2\nlookups outside",
+                      result.stdout)
 
 
 class ForwardTieTests(TempDirTest):

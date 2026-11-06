@@ -1,0 +1,7 @@
+unconstrained endpoints: 0
+unclocked registers: 0
+input ports without set_input_delay: 0
+input ports without set_input_transition: 0
+output ports without set_load: 0
+ignored timing arcs: 0
+lookups outside the table grid: 0 of 68

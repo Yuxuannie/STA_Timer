@@ -15,8 +15,8 @@ def load(lib_paths, verilog_path):
     return lib, netlist, graph.link(netlist, lib)
 
 
-def timed(lib, netlist, linked, sdc_path):
-    """The timed P2 graph; g.sdc, g.lib and g.netlist are attached."""
-    g = timer.run(linked, netlist, lib, sdc.load(sdc_path))
+def timed(lib, netlist, linked, sdc_path, grid=None):
+    """The timed P2 graph; g.sdc, g.lib and g.netlist are attached. `grid`: timer.run."""
+    g = timer.run(linked, netlist, lib, sdc.load(sdc_path), grid=grid)
     g.lib, g.netlist = lib, netlist
     return g

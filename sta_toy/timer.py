@@ -71,11 +71,16 @@ class Check:
 
 
 class TimingGraph:
+    """`ignored` counts the timing() arcs build() skipped, per (cell, pin, related_pin,
+    type); `clocked` is the set of CK nodes on the clock port's net (check_timing.md)."""
+
     def __init__(self):
         self.nodes = []
         self.by_name = {}
         self.endpoints = []
         self.sdc = None
+        self.ignored = {}
+        self.clocked = set()
 
     def add_arc(self, src, dst, pairs, tables, kind):
         arc = Arc(src, dst, pairs, tables, kind)
@@ -128,6 +133,7 @@ def build(linked, netlist, lib, clock_port, port_loads):
                     raise P2Error(netlist.file, _connection_line(netlist, sink.name),
                                   "clock port %s drives a non-clock pin %s"
                                   % (driver.name, sink.name))
+            g.clocked.update(sinks)
             continue
         driver.load = sum(s.cap for s in sinks)
         for sink in sinks:
@@ -151,12 +157,18 @@ def build(linked, netlist, lib, clock_port, port_loads):
                     continue
                 if timing.timing_type == "rising_edge":
                     pairs = RISING_EDGE_PAIRS
-                elif timing.timing_type != "combinational":
-                    fail("unsupported timing_type %s" % timing.timing_type)
-                elif timing.timing_sense not in SENSE_PAIRS:
-                    fail("unsupported timing_sense %s" % (timing.timing_sense or "(none)"))
-                else:
+                elif (timing.timing_type == "combinational"
+                      and timing.timing_sense in SENSE_PAIRS):
                     pairs = SENSE_PAIRS[timing.timing_sense]
+                else:
+                    # P5 (p2_semantics.md "Changes in P5"): ignored and counted, not an error.
+                    what = timing.timing_type
+                    if what == "combinational":
+                        what = "combinational:%s" % (timing.timing_sense or "none")
+                    for r in timing.related_pins:
+                        key = (cell.name, pin.name, r, what)
+                        g.ignored[key] = g.ignored.get(key, 0) + 1
+                    continue
                 tables = {rf: (_table(timing, DELAY_TABLES[rf][0], DELAY_VARS, fail),
                                _table(timing, DELAY_TABLES[rf][1], DELAY_VARS, fail))
                           for rf in sorted(set(out for _, out in pairs))}
@@ -203,16 +215,18 @@ def check_sdc(sdc, netlist, lib):
             error(line, "%s on input port %s" % (cmd, name))
 
 
-def run(linked, netlist, lib, sdc):
-    """Everything after parsing, in the error order of §10; returns the timed graph."""
+def run(linked, netlist, lib, sdc, grid=None):
+    """Everything after parsing, in the error order of §10; returns the timed graph.
+    `grid`, if a list, receives every lookup of forward, check and backward
+    (check_timing.md §7)."""
     check_sdc(sdc, netlist, lib)
     g = build(linked, netlist, lib, sdc.clock_port, sdc.load)
     g.sdc = sdc
     order = topological_order(g)
     set_sources(g, sdc)
-    forward(g, order)
-    g.endpoints = check(g, sdc)
-    backward(g, order, g.endpoints)
+    forward(g, order, grid=grid)
+    g.endpoints = check(g, sdc, grid=grid)
+    backward(g, order, g.endpoints, grid=grid)
     return g
 
 
@@ -257,17 +271,41 @@ def set_sources(g, sdc):
                 n.slew[mode]["r"] = sdc.clock_transition
 
 
-def arc_delay(arc, mode, rf_in, rf_out):
+def _lookup(table, kind, args, grid):
+    """lookup.lookup(); with a `grid` list, through lookup_detail, recording
+    (table kind, table, detail)."""
+    if grid is None:
+        return lookup.lookup(table, args)
+    detail = lookup.lookup_detail(table, args)
+    grid.append((kind, table, detail))
+    return detail["value"]
+
+
+def _delay_args(arc, mode, rf_in):
+    return {"input_net_transition": arc.src.slew[mode][rf_in],
+            "total_output_net_capacitance": arc.dst.load}
+
+
+def arc_delay(arc, mode, rf_in, rf_out, grid=None):
     """Delay and output slew of one arc pair, with the source's slew in `mode` (§3)."""
     slew = arc.src.slew[mode][rf_in]
     if arc.tables is None:
         return 0.0, slew
     delay, transition = arc.tables[rf_out]
-    args = {"input_net_transition": slew, "total_output_net_capacitance": arc.dst.load}
-    return lookup.lookup(delay, args), lookup.lookup(transition, args)
+    args = _delay_args(arc, mode, rf_in)
+    kinds = DELAY_TABLES[rf_out]
+    return _lookup(delay, kinds[0], args, grid), _lookup(transition, kinds[1], args, grid)
 
 
-def forward(g, order):
+def _delay_only(arc, mode, rf_in, rf_out, grid):
+    """arc_delay()[0] without the transition lookup (backward needs only the delay)."""
+    if arc.tables is None:
+        return 0.0
+    return _lookup(arc.tables[rf_out][0], DELAY_TABLES[rf_out][0],
+                   _delay_args(arc, mode, rf_in), grid)
+
+
+def forward(g, order, grid=None):
     """§6: AT is the max (late) / min (early) over incoming arcs, ties to the first
     candidate by (source name, r before f); SLEW is the worst over all arcs."""
     for v in order:
@@ -280,7 +318,7 @@ def forward(g, order):
                     for rf_u, rf_v in arc.pairs:
                         at = arc.src.at[mode][rf_u]
                         if rf_v == rf and at is not None:
-                            delay, slew = arc_delay(arc, mode, rf_u, rf)
+                            delay, slew = arc_delay(arc, mode, rf_u, rf, grid)
                             cands.append((arc.src.name, RF_RANK[rf_u], at + delay, slew, (arc.src, rf_u)))
                 if not cands:
                     continue
@@ -294,7 +332,7 @@ def forward(g, order):
                 v.slew[mode][rf] = (max if mode == "late" else min)(c[3] for c in cands)
 
 
-def check(g, sdc):
+def check(g, sdc, grid=None):
     """§7: required times of the D pins (constraint tables at D slew x CK slew) and of the
     output ports with set_output_delay. Returns the endpoints."""
     endpoints = []
@@ -306,8 +344,9 @@ def check(g, sdc):
                 for rf in ("r", "f"):
                     if n.slew[mode][rf] is None or ck_at is None:
                         continue
-                    t = lookup.lookup(c.tables[rf], {"constrained_pin_transition": n.slew[mode][rf],
-                                                     "related_pin_transition": ck_slew})
+                    t = _lookup(c.tables[rf], CHECK_TABLES[rf],
+                                {"constrained_pin_transition": n.slew[mode][rf],
+                                 "related_pin_transition": ck_slew}, grid)
                     if c.kind == "setup":
                         n.rat["late"][rf] = ck_at + sdc.period - t - sdc.uncertainty["setup"]
                     else:
@@ -324,7 +363,7 @@ def check(g, sdc):
     return endpoints
 
 
-def backward(g, order, endpoints):
+def backward(g, order, endpoints, grid=None):
     """§8: RAT is the min (late) / max (early) over outgoing arc pairs of RAT(v) - delay,
     the delay taken with this node's slew; endpoints keep their RAT from §7."""
     ends = set(endpoints)
@@ -335,7 +374,7 @@ def backward(g, order, endpoints):
             for rf in ("r", "f"):
                 if u.slew[mode][rf] is None:
                     continue
-                cands = [arc.dst.rat[mode][rf_v] - arc_delay(arc, mode, rf, rf_v)[0]
+                cands = [arc.dst.rat[mode][rf_v] - _delay_only(arc, mode, rf, rf_v, grid)
                          for arc in u.fanout for rf_u, rf_v in arc.pairs
                          if rf_u == rf and arc.dst.rat[mode][rf_v] is not None]
                 if cands:
