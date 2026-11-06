@@ -76,7 +76,7 @@ accent colour, each cell's `+delay`, each output's arrival) and *Waveform* (both
 their rising edges labelled, the data window, the setup and hold windows and slacks), and under
 them the path table in three sections (source clock, data path, destination clock) with load,
 fanout, slew, incr (the largest cell delay in bold), AT, RAT and pin slack. ←/→ walk the signal
-pin to pin, ↑/↓ change endpoint, S / H the check, 1 / 2 the view. A side input ends in ⊕: click it to draw the
+pin to pin, ↑/↓ change endpoint, S / H the check, 1 / 2 the view (3: the Trace tab). A side input ends in ⊕: click it to draw the
 cell driving it (and keep digging backwards); ↺ marks a side input whose driver is already on
 screen. Click a pin: the inspector shows its AT / RAT / slew, the lookup behind its delay
 (input slew and load → delay, with the table's grid cell and `extrapolated below` / `above`
@@ -87,11 +87,18 @@ panels. Themes: light, dark, contrast (header switch or `--theme`).
 `python -m sta_toy.viewer ... [--scale S]` sets the UI scale (0.6 to 2.0). The default is
 1.0 on macOS, and elsewhere comes from the display's DPI. The window opens at most 92 % x
 90 % of the screen and is centred, so it fits on a 1280x800 laptop. The Profile view is
-gone: keys `1` and `2` switch between schematic and waveform, and the path table shows the
+gone: keys `1` and `2` switch between schematic and waveform (`3` opens the Trace tab below), and the path table shows the
 largest cell delay in bold. In engine mode, the inspector shows the table lookup grid behind
 each delay, output slew and setup / hold time, and marks queries outside the table as
 `extrapolated below` / `above`. The path table and the inspector also show each driving
 pin's fanout.
+
+The viewer's **Trace** tab (key `3`, engine mode only) replays the engine's own log for the
+selected endpoint: the same entries `--trace` prints. Use `◀ step back`, `▶ step` and
+`▶▶ run to end` to move through forward propagation, the check, backward propagation, the
+slacks and the worst paths. The schematic shows the whole fan-in cone with the current
+pin ringed. The table and inspector show only the numbers the replay has reached, and
+the inspector lists the current step's candidates, winner first.
 
 ## Engine health, trace and units (stage P5)
 

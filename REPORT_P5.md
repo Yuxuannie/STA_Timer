@@ -1,5 +1,5 @@
-STATUS: IN PROGRESS — phase 5 (all three merged; R40 done; reviewer next)
-Branch p5-ref @ (see `git log`); worker branches p5-viewer @ 785073d, p5-engine @ 1f97fe7, p5-opensta @ 4b33b9e (all merged with --no-ff); started 2026-11-05 21:46 CST, last update 2026-11-05 23:10 CST
+STATUS: DONE
+Branch p5-ref @ the commit that last changed this file (`git log -1 --format=%h -- REPORT_P5.md`; pushed); worker branches p5-viewer @ 785073d, p5-engine @ 1f97fe7, p5-opensta @ 4b33b9e, p5-trace @ 9b47cb3 (all merged with --no-ff, pushed as merged); started 2026-11-05 21:46 CST, last update 2026-11-05 23:58 CST
 
 ## 1. Result table
 | ID | status (done / partial / skipped) | commit(s) | note |
@@ -13,9 +13,9 @@ Branch p5-ref @ (see `git log`); worker branches p5-viewer @ 785073d, p5-engine 
 | R38 | done | 5b312c9 (merged) | W3; s1423 from a public mirror, 748 instances, period 75.6 |
 | R39 | done | 66632d7, 8b8af9b, 4b33b9e (merged), 588f756 (lead: run.sh path fix) | W3; OpenSTA 3.1.0 source build in 25 of 90 min; s1423 kept as a snapshot (oracle rule) |
 | R40 | done | 3ff042e | lead; 5 policy classes, 0 toy-bug, 0 adapter (numbers); cases in `ref/cases/` |
-| R41 | pending | | lead, optional |
+| R41 | done | 8d88d1c, 9b47cb3 (p5-trace, merged) | lead, delegated to W1 (§6.10a); Trace tab, key 3, engine mode only; 20 min of the 2 h box |
 | R42 | done | d9d8d68, c4024a1 | lead; regex tokenizer, stream-identical; ×500 library parse 3.23 → 2.22 s (python3), 1.84 → 1.60 s (python3.12) |
-| R43 | pending | | lead |
+| R43 | done | docs folds at each merge, this report, push | lead |
 
 ## 2. Tests
 before (viewer-v2 @ ed316ad): 155 (4 skipped) on /usr/bin/python3 (3.9.6), 155 (1 skipped) on ~/.local/bin/python3.12
@@ -23,9 +23,10 @@ after interface commit bbb685d: 159 (4 skipped) / 159 (1 skipped) — 4 new look
 after merge of p5-engine: 183 (4 skipped) / 183 (1 skipped)
 after merge of p5-viewer + bundle fanout: 194 (6 skipped) / 194 (2 skipped)
 after merge of p5-opensta + R40 cases: 214 (6 skipped) / 214 (1 skipped)
-after reviewer fixes: 215 / 215; after R42: 221 (6 skipped) / 221 (1 skipped) — the OpenSTA tests (test_ref.OpenStaTests, test_ref_cases) and the s1423 Tk smoke test run
+after reviewer fixes: 215 / 215; after R42: 221 (6 skipped) / 221 (1 skipped)
+**final, p5-ref after the p5-trace merge: 225 (6 skipped) on /usr/bin/python3, 225 (1 skipped) on python3.12** — the OpenSTA tests (test_ref.OpenStaTests, test_ref_cases) and the s1423 Tk smoke test run
 skips: /usr/bin/python3 skips the 5 `TkSmokeTests` (Tk cannot open a window) and `ViewerCliTests.test_no_tkinter` (this Python has tkinter); python3.12 skips only `test_no_tkinter`
-time: /usr/bin/python3 ≈ 11 s; python3.12 ≈ 190 s (almost all in W1's mapped-window overlap / cut-off check)
+time: /usr/bin/python3 ≈ 11 s; python3.12 ≈ 330 s (almost all in W1's mapped-window overlap / cut-off check, which R41 extended to the Trace tab; limiting the Trace part to scale 1.0 would roughly halve it)
 commands:
     /usr/bin/python3 -m unittest discover -s tests
     ~/.local/bin/python3.12 -m unittest discover -s tests
@@ -36,6 +37,7 @@ commands:
 - Screenshots: none. `screencapture` exits 0 but records only the wallpaper (this process has no Screen Recording permission); W1 stopped after one try as the brief says.
 - Removed: the Profile view (key `3` unbound, reserved for R41), `model.profile`, its tests and contract text; the compatibility path for bundles without `instances` (now `error: bundle has no instances: write it again with --bundle`, exit 1) and `source.note`.
 - Added: largest data-path cell `INCR` in bold; waveform rising-edge labels (`ff2_holdviol` `FF2/D` capture: `3.5000`, `13.5000`); near-critical threshold 1 % of the period shown as `near-critical: margin < 0.1000`; lookup grid under each lookup (engine mode); FANOUT column and inspector `fanout`.
+- R41 Trace tab (key `3`, engine mode only; faint and inert in bundle mode): `◀ step back`, `▶ step`, `▶▶ run to end`, phase label (`backward · 17 of 30`), the cone auto-expanded (300-pin limit, `truncated` note), the current pin ringed; AT badges, table cells (slew, incr, AT, RAT, slack) and inspector values blank until reached; the inspector lists the current step's candidates, winner first. Values come only from the log (`model.Replay`); the Data path Σ and stub arrivals, which are not in the log, are hidden in the tab. Model test: stepping over ff2_default FF2/D gives the 78 (phase, pin) pairs read from the golden trace text.
 - s1423 Tk smoke test (open, worst setup endpoint, both views, 3 steps, Hold, `[`, `]`): 1.09 s against the 10 s bound (`~/.local/bin/python3.12 -m unittest -v tests.test_viewer.TkSmokeTests.test_s1423_in_10_seconds`).
 
 ## 4. OpenSTA correlation
@@ -186,12 +188,13 @@ Engine (W2; recorded in DECISIONS.md R35–R37 and its contracts):
 14. R37: the units check sits in `design.load` (CLI and viewer path), not in `liberty.loads`, so the parser unit tests that build unit-less libraries stay unchanged; conversion factors are exact fractions; both protected libraries already declare ns / pF, so no golden run can hit the new error.
 15. `trace.py` imports the private `bundle._cone` so the cone definition cannot drift; I left the name private.
 
-Viewer (W1; DECISIONS.md R32–R34):
+Viewer (W1; DECISIONS.md R32–R34, R41):
 16. Fonts scale by `s / s_default` (Tk points already follow the display's dpi); on aqua that is exactly `s`. Hairlines stay 1 px.
 17. Edge labels are `(t, text, anchor)` instead of `(t, text)`: a label moves left of its edge when the right side would cross a mark line; without it the required `3.5000` label on `ff2_holdviol` would be dropped (the hold line at 3.6 runs through it). The "8.5000 at the 3.5 edge" bug the brief mentions was not present.
 18. The brief's R34 example (`s27` `U14/Y` extrapolated below) is wrong: U14 is driven by G0 with input transition 0.05, inside the grid. The test asserts the true slew-0 cases (`FF7/Q`, `U13/Y`, the constraints' CK-slew axis) and that U14/Y has none.
 19. Lookup grid in engine mode only: bundles carry delays, not tables.
 20. Overlap / cut-off fixes found by the new check: waveform arrow lanes 46 px apart (was 34); merge-card margin and long table-axis values wrap; near-critical threshold on its own line.
+20a. R41: key 3 now opens the Trace tab, so the R33 assertion "key 3 is unbound" changed with it (section 6 allows changing a test a requirement names; R33 reserved 3 for R41). Badges show AT only (RAT in table and inspector); rows outside the data path keep their SDC values but stay blank until the path's first point / the endpoint check is reached; the pin-slack column shows only the endpoint (the log has slack entries only there); the trace is the engine timed once more with a log, filtered exactly as `trace.format_trace` does.
 
 Reference (W3; DECISIONS.md R38–R39):
 21. s1423 converts to 748 instances (the brief's "≈1000" read as an order of magnitude; no padding). Instance names drop a leading `G` before a digit, as `data/s27.v` does, so the s27 round-trip test compares all three files at `--tol 0`.
@@ -242,7 +245,11 @@ Read-only reviewer on p5-ref @ ed70585 (worktree `../p5-wt/rev`, clean afterward
 11. (R43, in progress at review time) DECISIONS "Interventions" entry and TRACE rows R41–R43: done in the finish step.
 
 ## 9. Not done
-(pending)
+1. P5-1a adapter fix (CK-pin slew / arrival from OpenSTA's clock paths instead of its vertex properties): classified, route written (§7.1), not implemented — over the reviewer phase's 30-minute rule. State: `ref/opensta/run.tcl` dumps vertex properties; `test_ref_cases.test_p5_1_ck_pin_slew` asserts the current (0.0000 vs 0.0500) difference.
+2. s1423 as an OpenSTA golden: not possible under the oracle rule until §7's classes are resolved; kept as an engine snapshot (`tests/snapshot/s1423/`, labelled as such).
+3. Viewer screenshots (R32 manual check): this process has no Screen Recording permission; `screencapture` records only the wallpaper. No PNGs.
+4. Lookup grid in bundle mode (R34): bundles carry delays, not tables; the grid is engine mode only (recorded in viewer_p4.md).
+5. Everything else in sections 2 and 8 is done; no partial commit is left on any branch.
 
 ## 10. How to reproduce every number above
 From the repo root on `p5-ref` (OpenSTA at `~/tools/opensta/build/sta`, else set `STA_BIN`):
