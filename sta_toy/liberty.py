@@ -41,7 +41,7 @@ def parse_file(path):
 
 def parse(text, filename):
     """Parse Liberty text into its single top-level group."""
-    p = _Parser(_tokenize(text, filename), filename)
+    p = _Parser(list(_tokenize(text, filename)), filename)
     holder = Group("", [], 0)
     first = p.peek()
     p.statement(holder)
@@ -52,73 +52,51 @@ def parse(text, filename):
     return holder.groups[0]
 
 
-def _continuation_end(text, i):
-    """If text[i] is a backslash ending its line, return the index after the newline."""
-    j = i + 1
-    while j < len(text) and text[j] in " \t\r":
-        j += 1
-    if j < len(text) and text[j] == "\n":
-        return j + 1
-    return None
+_TOKEN = re.compile(r'(?P<ws>\s+)|(?P<word>(?:[^\s(){}:;,"\\/]|/(?!\*))+)|(?P<punct>[(){}:;,])'
+                    r'|(?P<cmt>/\*)|(?P<str>")|(?P<bs>\\)')
+_CONT = re.compile(r"\\[ \t\r]*\n")
 
 
 def _tokenize(text, filename):
-    """Return (kind, value, line) tuples; kind is a punctuation char, 'str', 'word' or 'eof'."""
-    tokens = []
+    """Yield (kind, value, line) tuples; kind is a punctuation char, 'str', 'word' or 'eof'.
+    One regex match per token (R42); the output, errors included, is that of the character
+    loop it replaced (kept as tests/test_tokenizer.py `_tokenize_reference`)."""
     i, line, n = 0, 1, len(text)
+    match = _TOKEN.match
     while i < n:
-        c = text[i]
-        if c == "\n":
-            line += 1
-            i += 1
-        elif c.isspace():
-            i += 1
-        elif c == "\\":
-            j = _continuation_end(text, i)
-            if j is None:
-                raise StaError(filename, line, "unexpected '\\'")
-            line += 1
-            i = j
-        elif text.startswith("/*", i):
+        m = match(text, i)
+        kind = m.lastgroup
+        if kind == "ws":
+            line += m.group().count("\n")
+        elif kind == "word":
+            yield ("word", m.group(), line)
+        elif kind == "punct":
+            yield (m.group(), m.group(), line)
+        elif kind == "cmt":
             end = text.find("*/", i + 2)
             if end < 0:
                 raise StaError(filename, line, "unterminated comment")
             line += text.count("\n", i, end)
             i = end + 2
-        elif c == '"':
-            start = line
-            chars = []
-            i += 1
-            while True:
-                if i >= n:
-                    raise StaError(filename, start, "unterminated string")
-                c = text[i]
-                if c == '"':
-                    i += 1
-                    break
-                if c == "\\":
-                    j = _continuation_end(text, i)
-                    if j is not None:
-                        line += 1
-                        i = j
-                        continue
-                if c == "\n":
-                    line += 1
-                chars.append(c)
-                i += 1
-            tokens.append(("str", "".join(chars), start))
-        elif c in _PUNCT:
-            tokens.append((c, c, line))
-            i += 1
+            continue
+        elif kind == "str":
+            end = text.find('"', i + 1)
+            if end < 0:
+                raise StaError(filename, line, "unterminated string")
+            body = text[i + 1:end]
+            yield ("str", _CONT.sub("", body), line)       # a backslash-newline inside is dropped
+            line += body.count("\n")
+            i = end + 1
+            continue
         else:
-            j = i
-            while (j < n and not text[j].isspace() and text[j] not in _PUNCT + '"\\'
-                   and not text.startswith("/*", j)):
-                j += 1
-            tokens.append(("word", text[i:j], line))
-            i = j
-    tokens.append(("eof", "", line))
-    return tokens
+            c = _CONT.match(text, i)
+            if c is None:
+                raise StaError(filename, line, "unexpected '\\'")
+            line += 1
+            i = c.end()
+            continue
+        i = m.end()
+    yield ("eof", "", line)
 
 
 def _show(tok):
