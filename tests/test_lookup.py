@@ -30,6 +30,40 @@ class InterpolationTests(unittest.TestCase):
             self.assertAlmostEqual(got, expected, delta=1e-9, msg="(%s, %s)" % (x1, x2))
 
 
+class LookupDetailTests(unittest.TestCase):
+    """P5 interface: lookup_detail reports the grid cell lookup() used, on the R19b table."""
+
+    class _Table:
+        variables = ["a", "b"]
+        index_1 = InterpolationTests.INDEX_1
+        index_2 = InterpolationTests.INDEX_2
+        values = InterpolationTests.VALUES
+
+    def detail(self, a, b):
+        return lookup.lookup_detail(self._Table, {"a": a, "b": b})
+
+    def test_interior(self):
+        d = self.detail(1.5, 15)
+        self.assertEqual(d["corners"], [[1, 2], [2, 4]])
+        self.assertEqual(d["segment"], [0, 0])
+        self.assertEqual(d["bracket"], [[1, 2], [10, 20]])
+        self.assertEqual(d["extrapolated"], [None, None])
+        self.assertEqual(d["axes"], ["a", "b"])
+        self.assertEqual(d["query"], [1.5, 15])
+
+    def test_above_both(self):
+        d = self.detail(5, 50)
+        self.assertEqual(d["segment"], [1, 1])
+        self.assertEqual(d["extrapolated"], ["above", "above"])
+
+    def test_below_axis_1(self):
+        self.assertEqual(self.detail(0.5, 10)["extrapolated"], ["below", None])
+
+    def test_value_equals_lookup(self):
+        for a, b in [(1, 10), (1.5, 15), (3, 30), (0.5, 10), (4, 5), (5, 50), (2, 40)]:
+            self.assertEqual(self.detail(a, b)["value"], lookup.lookup(self._Table, {"a": a, "b": b}))
+
+
 class TemplateOrderTests(unittest.TestCase):
     """R10 + R11 / R19c: axes come from the template's variable names."""
 

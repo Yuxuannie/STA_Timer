@@ -24,3 +24,29 @@ def lookup(table, args):
     """Look up a liberty.Table; `args` maps each template variable name to its query value."""
     return bilinear(table.index_1, table.index_2, table.values,
                     args[table.variables[0]], args[table.variables[1]])
+
+
+def _side(axis, p):
+    """None inside [axis[0], axis[-1]], else "below" / "above"."""
+    if p < axis[0]:
+        return "below"
+    if p > axis[-1]:
+        return "above"
+    return None
+
+
+def lookup_detail(table, args):
+    """lookup() with the grid cell it used (P5 interface): value, axes, query,
+    segment, bracket, corners and per-axis extrapolation side."""
+    x, y, v = table.index_1, table.index_2, table.values
+    p, q = args[table.variables[0]], args[table.variables[1]]
+    i, j = _segment(x, p), _segment(y, q)
+    return {
+        "value": lookup(table, args),
+        "axes": [table.variables[0], table.variables[1]],
+        "query": [p, q],
+        "segment": [i, j],
+        "bracket": [[x[i], x[i + 1]], [y[j], y[j + 1]]],
+        "corners": [[v[i][j], v[i][j + 1]], [v[i + 1][j], v[i + 1][j + 1]]],
+        "extrapolated": [_side(x, p), _side(y, q)],
+    }
