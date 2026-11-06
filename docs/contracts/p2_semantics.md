@@ -183,9 +183,9 @@ until a node with no predecessor (a PI or a CK pin).
 Errors are detected and reported in this order, and the first one stops the
 run: library parse → netlist parse → link (unknown cell, unknown pin, two
 drivers) → SDC syntax → SDC semantics (§ "Errors" of `sdc_subset.md`) →
-timing graph (clock port driving a non-clock pin; unsupported `timing_type`
-or `timing_sense`; combinational loop). A loop test therefore needs a valid
-library, netlist and SDC.
+timing graph (clock port driving a non-clock pin; combinational loop). A
+loop test therefore needs a valid library, netlist and SDC. An unsupported
+`timing_type` or `timing_sense` is no longer an error (see "Changes in P5").
 
 ## 11. Number format and comparison
 
@@ -201,3 +201,19 @@ def fmt4(v):
     return "0.0000" if s == "-0.0000" else s
 ```
 All max/min/tie comparisons use an absolute tolerance of 1e-9.
+
+## Changes in P5
+
+2026-11-05 (W2, R35). §3's last rule ("any other `timing_type` or
+`timing_sense` → error") and the matching §10 error are replaced by: a
+`timing()` group whose `timing_type` is not `combinational`, `rising_edge`,
+`setup_rising` or `hold_rising`, or a `combinational` group whose
+`timing_sense` is missing or not one of the three of §3, is **ignored and
+counted**: it creates no arc and no check, and its tables are not read. The
+count is kept on the timing graph per `(cell, pin, related_pin, type)` and
+instance, printed as a warning by the CLI and listed by `--check-timing`
+(`cli_p5.md`, `check_timing.md`). Why: real libraries carry recovery /
+removal / min_pulse_width / clear / preset arcs on every flop; refusing them
+made every real library unusable, while ignoring them leaves every value of
+the supported arcs unchanged (the eight goldens prove it). A missing or
+non-2-D table of a supported group is still an error.
