@@ -17,11 +17,12 @@ which one they have:
   arc_lookup(from_pin, to_pin, check, rf_from, rf_to)
                        {"delay", "slew"}: lookup.lookup_detail of the arc's tables, or None
   check_lookup(pin, check, rf)   lookup.lookup_detail of a D pin's constraint table, or None
+  trace(endpoint)      the R36 trace entries of the endpoint (trace.md), or None
 """
 
 import json
 
-from sta_toy import P2Error, design, lookup, paths, timer
+from sta_toy import P2Error, bundle, design, lookup, paths, timer, trace
 
 SCHEMA = "sta_toy.bundle/1"
 MODE = {"setup": "late", "hold": "early"}
@@ -56,6 +57,8 @@ class EngineSource:
     def __init__(self, lib_paths, verilog_path, sdc_path):
         lib, netlist, linked = design.load(lib_paths, verilog_path)
         self.g = design.timed(lib, netlist, linked, sdc_path)
+        self._design = (lib, netlist, linked, sdc_path)
+        self._traces, self._log = {}, None
         self.design_name = netlist.name
         self.clock_name = self.g.sdc.clock_name
         self.period = self.g.sdc.period
@@ -172,6 +175,21 @@ class EngineSource:
         best = (max if mode == "late" else min)(d["delay"]["value"] for d in found)
         return [d for d in found if d["delay"]["value"] == best][0]
 
+    def trace(self, endpoint):
+        """R41: the entries `trace.format_trace` prints for `endpoint`, in log order. The
+        design is timed once more with a log (the first time a trace is asked for)."""
+        if endpoint not in self._traces:
+            if self._log is None:
+                self._log = []
+                self._trace_g = design.timed(*self._design, log=self._log)
+            log = list(self._log)
+            e = trace.collect(self._trace_g, endpoint, log)
+            cone = {n.name for n in bundle._cone(e, float("inf"))}
+            keep = dict((phase, endpoint_only) for phase, _, endpoint_only in trace.SECTIONS)
+            self._traces[endpoint] = [x for x in log
+                                      if (x["pin"] == endpoint if keep[x["phase"]] else x["pin"] in cone)]
+        return self._traces[endpoint]
+
     def check_lookup(self, pin, check, rf):
         """The setup / hold constraint lookup of D pin `pin` at (D slew, CK slew), as
         timer.check computes it (a later group of the same kind wins)."""
@@ -278,3 +296,6 @@ class BundleSource:
 
     def check_lookup(self, pin, check, rf):
         return None
+
+    def trace(self, endpoint):
+        return None                     # R41: engine mode only

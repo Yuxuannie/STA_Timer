@@ -231,3 +231,44 @@ fixed minimum of 1200x760, larger than a 1280x800 or 1440x900 laptop screen.
   bundle owner). The path table gets a `fanout` column after `load` (empty for input pins
   and the capture pin, which drive no net); the inspector shows `fanout N` beside `load`
   for output pins and input ports.
+
+**R41 - Trace tab (2026-11-05, optional, lead item done by W1).** Replays the R36 engine
+log (`trace.md`) for the selected endpoint. Written before the code.
+- `EngineSource.trace(endpoint)` -> the trace entries of `trace.md` in log order: the
+  graph is timed a second time with a log, `trace.collect` appends the slack and path
+  entries, and the entries are filtered exactly as `trace.format_trace` filters them
+  (forward / backward entries of cone pins; check, slack and path entries of the endpoint
+  only). Cached per endpoint. `BundleSource.trace` -> `None`.
+- `model.Replay(entries)`: position `k` (0 = the first entry, starts there); `step(delta)`
+  (clamped to the first and last entry), `run_to_end()`, `current` (the entry at `k`),
+  `label` (`<phase> · <k+1> of <n>`), `at_end`. The values the replay has reached are those
+  of entries `0..k`, read from the entries, never computed: `forward(pin, mode, rf)` ->
+  the entry (`at`, `slew`, and `delay` = the winner candidate's delay, `None` for a
+  source); `rat(pin, mode, rf)` -> the `rat` of a backward entry or of a check entry
+  (`kind` setup = late, hold = early); `slack(pin, kind, rf)` -> the slack entry's
+  `slack`; `None` when not reached. `ordered(entry)` -> its candidates, the winner first,
+  then the others in log order.
+- `model.trace_table(sections, path, replay)`: `path_table` sections for the Trace tab.
+  Data rows take `slew`, `incr` (winner delay), `value` (AT), `rat` and `slack` from the
+  replay (`None` = not reached, drawn blank); the other rows keep their path-object values
+  but are blank (`None`) until the replay reaches the path's first point (source / input
+  section) or the endpoint's check entry for the path's kind and endpoint rf (destination
+  section); the final slack comes from the endpoint's slack entry.
+- `model.auto_expand(path, source, limit=300)`: the schematic with every side input
+  expanded, round by round, until no `expand` stub is left or the drawing has `limit` pins
+  or more; returns `(layout, truncated)` (`truncated` when stubs were left).
+- Window: tab `3` "Trace" after Schematic and Waveform, engine mode only; in bundle mode it
+  is drawn faint and neither a click nor `3` opens it. In the Trace tab the tab strip gets a
+  second row: `◀ step back`, `▶ step`, `▶▶ run to end` and the phase label, plus
+  `truncated` when the auto-expansion stopped. The view is the auto-expanded schematic of
+  the current check's worst path with the current entry's pin ringed (canvas tag `ring`);
+  AT badges show `<at> <rf>` only once reached, from the replay (RAT is shown in the table
+  and the inspector); cell delay labels show the winner delay once reached; stub arrival
+  labels are blank. The Data path total (Σ) is not shown in the Trace tab (it is a sum). The path table is
+  `trace_table`; blank cells are empty. The inspector shows the current entry: its pin,
+  phase, mode / kind, rf and position, the pin's AT / RAT / slew from the replay (blank
+  until reached), then the entry itself - its candidates winner first (forward: `AT +
+  delay = value`, backward: `RAT − delay = value`), or its check terms, slack terms or
+  path points. Test hooks: `trace_step(delta)`, `trace_end()`; `app.replay` is the current
+  endpoint's replay (`None` in bundle mode). The slack rows of the inspector show the
+  endpoint's slack entry for the rf of that check's worst path, blank for other pins.

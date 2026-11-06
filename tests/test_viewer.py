@@ -453,6 +453,85 @@ class ViewModelTests(unittest.TestCase):
                          [True, False, True, False])
 
 
+class TraceReplayTests(unittest.TestCase):
+    """R41: the Trace tab's replay of the R36 log, without Tk."""
+
+    def golden_sequence(self):
+        """(phase, pin) per entry, read from the structure of the golden trace text: section
+        header lines, then one header line per entry (candidate lines start with spaces);
+        a path line names the endpoint last."""
+        with open(os.path.join(ROOT, "tests", "golden", "trace", "ff2_default_FF2_D.txt")) as f:
+            lines = f.read().splitlines()[2:]
+        seq, phase = [], None
+        for line in lines:
+            if line in ("forward", "check", "backward", "slack", "path"):
+                phase = line
+            elif not line.startswith(" "):
+                pin = line.split(" -> ")[-1].split("(")[0] if phase == "path" else line.split(" ")[0]
+                seq.append((phase, pin))
+        return seq
+
+    def test_steps_follow_the_trace_text(self):
+        replay = model.Replay(engine("ff2_default", "ff2").trace("FF2/D"))
+        seq = [(replay.current["phase"], replay.current["pin"])]
+        while not replay.at_end:
+            replay.step(1)
+            seq.append((replay.current["phase"], replay.current["pin"]))
+        expected = self.golden_sequence()
+        self.assertEqual(seq, expected)
+        self.assertEqual(len(expected), 78)
+        self.assertEqual(replay.label, "path · 78 of 78")
+
+    def test_reached_values(self):
+        src = engine("ff2_default", "ff2")
+        replay = model.Replay(src.trace("FF2/D"))
+        self.assertEqual(replay.label, "forward · 1 of 78")
+        self.assertIsNone(replay.forward("U2/Y", "late", "r"))     # not reached yet
+        self.assertIsNotNone(replay.forward("x", "late", "r"))
+        replay.step(-5)
+        self.assertEqual(replay.k, 0)                               # clamped
+        while replay.current["pin"] != "U2/Y":
+            replay.step(1)
+        # U2/Y late r: AT 4.0 from U2/B(f) (delay 2.0); U2/A(f) lost (golden trace text).
+        self.assertEqual(replay.forward("U2/Y", "late", "r"), {"at": 4.0, "slew": 0.05, "delay": 2.0})
+        self.assertEqual([c["src"] for c in model.Replay.ordered(replay.current)], ["U2/B", "U2/A"])
+        self.assertIsNone(replay.rat("FF2/D", "late", "r"))
+        self.assertIsNone(replay.slack("FF2/D", "setup", "r"))
+        path = src.paths("FF2/D")["setup"]
+        sections, slack = model.trace_table(model.path_table(path, src), path, replay)
+        data = dict((r["label"], r) for r in sections[1]["rows"])
+        self.assertEqual((data["U2/Y"]["value"], data["U2/Y"]["incr"], data["FF2/D"]["value"]), (4.0, 2.0, None))
+        self.assertEqual([r["value"] for r in sections[2]["rows"]], [None] * len(sections[2]["rows"]))
+        self.assertIsNone(slack)
+        replay.run_to_end()
+        self.assertTrue(replay.at_end)
+        self.assertEqual((replay.rat("FF2/D", "late", "r"), replay.rat("U1/A", "early", "f")), (9.7, -3.4))
+        self.assertEqual(fmt4(replay.slack("FF2/D", "setup", "r")), "5.7000")
+        sections, slack = model.trace_table(model.path_table(path, src), path, replay)
+        full = model.path_table(path, src)
+        self.assertEqual(fmt4(slack), fmt4(path["slack"]))
+        for got, want in zip(sections[1]["rows"], full[1]["rows"]):     # the log gives the path's numbers
+            self.assertEqual((fmt4(got["value"]), fmt4(got["rat"])), (fmt4(want["value"]), fmt4(want["rat"])))
+        self.assertEqual([r["value"] for r in sections[2]["rows"]], [r["value"] for r in full[2]["rows"]])
+
+    def test_auto_expand(self):
+        src = engine("s27", "s27")
+        path = src.paths("FF5/D")["setup"]
+        lay, truncated = model.auto_expand(path, src)
+        self.assertFalse(truncated)
+        self.assertEqual([s for s in lay["stubs"] if s["state"] == "expand"], [])
+        lay, truncated = model.auto_expand(path, src, limit=10)
+        self.assertTrue(truncated)
+        self.assertTrue(any(s["state"] == "expand" for s in lay["stubs"]))
+
+    def test_bundle_has_no_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "b.json")
+            with open(path, "w") as f:
+                json.dump(bundle.debug_bundle(engine("ff2_default", "ff2").g, "FF2/D", depth=1), f)
+            self.assertIsNone(BundleSource(path).trace("FF2/D"))
+
+
 class ThemeTests(unittest.TestCase):
     def test_palettes(self):
         keys = set(theme.THEMES["light"])
@@ -592,7 +671,22 @@ class TkSmokeTests(unittest.TestCase):
             for tab in ("schematic", "waveform"):
                 app.set_tab(tab)
                 self.assertTrue(app.view.find_all(), tab)
-            self.assertEqual(app.root.bind("<Key-3>"), "")             # R33: 3 is reserved
+            self.assertTrue(app.root.bind("<Key-3>"))                  # R41: 3 opens the Trace tab
+            app.select_endpoint("FF5/D")
+            app.set_tab("trace")                                        # R41: three steps
+            for _ in range(3):
+                app.trace_step(1)
+            self.assertEqual(app.replay.k, 3)
+            current = app.replay.current
+            self.assertIn(current["pin"], self.texts(app.insp))
+            self.assertIn(app.replay.label, self.texts(app.tabs))
+            ring = app.view.find_withtag("ring")
+            self.assertEqual([app.view.gettags(i)[1] for i in ring], [current["pin"]])   # ringed
+            self.assertNotIn("8.6849", self.texts(app.table))           # FF5/D's AT: not reached yet
+            app.trace_end()
+            self.assertIn("8.6849", self.texts(app.table))
+            app.trace_step(-1)
+            self.assertFalse(app.replay.at_end)
             app.set_tab("schematic")
             app.expand("U9/A")
             app.set_check("hold")
@@ -634,6 +728,8 @@ class TkSmokeTests(unittest.TestCase):
                 json.dump(bundle.debug_bundle(src.g, "FF2/D", depth=1), f)
             app = self.App(self.root, BundleSource(path), "contrast")
         self.assertEqual(app.endpoint, "FF2/D")
+        app.set_tab("trace")                                    # R41: engine mode only
+        self.assertEqual((app.tab, app.replay), ("schematic", None))
         app.expand("U2/A")
         self.assertTrue(any(e["name"] == "FF1" for e in app.layout["elements"]))
         self.assertEqual(app.errors, [])
@@ -704,6 +800,15 @@ class TkSmokeTests(unittest.TestCase):
                     app.select_stage(k)
                     for cv in (app.view, app.table, app.insp):
                         self.check_canvas(cv, (scenario, scale, width, row["pin"], check, k))
+                # R41: the Trace tab at the first entry of every phase and at the end.
+                app.set_tab("trace")
+                self.root.update_idletasks()
+                entries = app.replay.entries
+                for i in [i for i in range(len(entries)) if i == 0 or entries[i]["phase"] != entries[i - 1]["phase"]] + \
+                        [len(entries) - 1]:
+                    app.trace_step(i - app.replay.k)
+                    for cv in canvases:
+                        self.check_canvas(cv, (scenario, scale, width, row["pin"], check, "trace", i))
         if app._static_job is not None:
             self.root.after_cancel(app._static_job)
         self.assertEqual(app.errors, [])
