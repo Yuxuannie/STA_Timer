@@ -119,3 +119,17 @@ values were obtained: every forward merge in its fan-in cone with each candidate
 (`AT + delay = value`, the winner marked `*`), the check (constraint, clock arrival,
 period, uncertainty), every backward merge, the endpoint's slacks and its worst setup
 and hold paths. The numbers are the engine's, logged as it computed them.
+
+## OpenSTA reference and s1423 (stage P5)
+
+`ref/run_all.sh` runs OpenSTA (built from source, `~/tools/opensta/build/sta` or `$STA_BIN`) on the eight P2 designs and `s1423`, rewrites its results in the golden format (`ref/opensta/to_golden.py`) and correlates them with the engine (`tools/correlate.py`: per-column statistics, largest differences, path sequences, grouping by cell type and logic level). Results land in `ref/results/` (git-ignored); see `docs/contracts/reference.md` and `ref/README.md`. `tools/bench2v.py` converts ISCAS `.bench` files to toy2.lib Verilog; `data/s1423.v` (748 instances) is ISCAS-89 s1423 converted that way, with its SDC in `data/sdc/s1423.sdc`; its expected output is an engine snapshot (`tests/snapshot/s1423/`), not an oracle.
+
+    ref/opensta/run.sh --probe                 # 3.1.0 <commit>, else what is missing
+    ref/run_all.sh                             # nine designs: one PASS/FAIL line each, details in ref/results/<d>/correlate.txt
+    ref/cases/run_cases.sh                     # the R40 smallest cases (ref/cases/README.md)
+    python3 tools/correlate.py GOLDEN_DIR ACTUAL_DIR [--tol 0.001] [--design V --lib L]
+    python3 tools/bench2v.py data/bench/s1423.bench data/s1423.v --top s1423
+
+Every difference found is classified in `REPORT_P5.md` §4 and §7: all are policy differences
+(CK-pin conventions, clock latency on I/O delays, uncertainty on output-port checks, unset
+input-delay facets, tie-break), none a bug of the engine or the adapter.
