@@ -82,3 +82,30 @@ screen. Click a pin: the inspector shows its AT / RAT / slew, the lookup behind 
 (input slew and load → delay) and which input set its arrival and which fanout set its
 required time, with each loser's margin. Drag any divider to resize; `[` and `]` hide the side
 panels. Themes: light, dark, contrast (header switch or `--theme`).
+
+## Engine health, trace and units (stage P5)
+
+Rules: `docs/contracts/cli_p5.md`, `check_timing.md`, `trace.md`, `p2_semantics.md` "Changes in P5".
+
+    python -m sta_toy --lib data/toy2.lib --verilog data/s27.v --sdc data/sdc/s27.sdc --check-timing
+    python -m sta_toy --lib data/toy2.lib --verilog data/ff2.v --sdc data/sdc/ff2_default.sdc --trace FF2/D
+
+**check_timing.** `--check-timing` (with `--sdc`) prints what the run left
+unconstrained or could not time: outputs without `set_output_delay`, registers whose CK
+pin is not on the clock net, inputs without `set_input_delay` / `set_input_transition`,
+outputs without `set_load`, the `timing()` groups the timer ignored, and how many table
+lookups fell outside their grid (per table kind and axis). A run that ignored any
+`timing()` group (recovery, removal, min_pulse_width, falling_edge, ...) still succeeds
+and prints one warning line on stderr.
+
+**Library units.** Every library must declare `time_unit` and
+`capacitive_load_unit`. The first `--lib` sets the units of the run (SDC values and
+every output); a further library in other units (say ps / fF) is converted to them
+when loaded. `python3 tools/gen_toy2_lib.py --time ps --cap ff --suffix _P` writes a
+ps / fF copy of toy2.lib with suffixed cell names to try it.
+
+**trace.** `--trace PIN` prints, for one endpoint, the engine's own log of how its
+values were obtained: every forward merge in its fan-in cone with each candidate
+(`AT + delay = value`, the winner marked `*`), the check (constraint, clock arrival,
+period, uncertainty), every backward merge, the endpoint's slacks and its worst setup
+and hold paths. The numbers are the engine's, logged as it computed them.
