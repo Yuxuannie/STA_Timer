@@ -176,7 +176,7 @@ fixed minimum of 1200x760, larger than a 1280x800 or 1440x900 laptop screen.
   (summary + views + table minimums) + dividers. When that minimum is larger than the
   size above (a large `--scale` on a small screen), the window opens at the minimum. At
   `s` = 1 on 1280x800 the window is 1177x720 and its minimum 1066x414, so it opens fully (sizes are rounded down to whole pixels).
-  The pure size arithmetic is `sta_toy/viewer/scale.py` (no Tk): `parse_scale(text)`,
+  The pure size arithmetic is `sta_toy/viewer/sizing.py` (no Tk): `parse_scale(text)`,
   `default_scale(windowing_system, tk_scaling)`, `minimum(s)`, `geometry(s, screen_w,
   screen_h)`.
 - Not built: runtime DPI changes, per-monitor handling, remembering sizes between runs.

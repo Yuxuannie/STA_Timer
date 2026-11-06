@@ -1,15 +1,16 @@
 """Viewer entry point (R29, viewer_p4.md "Start"):
-python -m sta_toy.viewer --lib L [--lib L ...] --verilog V --sdc S [--theme NAME]
-python -m sta_toy.viewer --bundle FILE [--theme NAME]
+python -m sta_toy.viewer --lib L [--lib L ...] --verilog V --sdc S [--theme NAME] [--scale S]
+python -m sta_toy.viewer --bundle FILE [--theme NAME] [--scale S]
 Errors follow cli_p2.md: one stderr line, exit 1."""
 
 import sys
 
 from sta_toy import P2Error, StaError
+from sta_toy.viewer.sizing import parse_scale
 from sta_toy.viewer.source import BundleSource, EngineSource
 from sta_toy.viewer.theme import NAMES
 
-OPTIONS = ("--lib", "--verilog", "--sdc", "--bundle", "--theme")
+OPTIONS = ("--lib", "--verilog", "--sdc", "--bundle", "--theme", "--scale")
 NO_TK = "error: the viewer needs a Python with tkinter"
 
 
@@ -30,6 +31,8 @@ def arguments(argv):
             args[option] = argv[i + 1]
     if args.get("--theme", "light") not in NAMES:
         raise P2Error(None, None, "--theme needs one of %s" % ", ".join(NAMES))
+    if "--scale" in args:
+        args["--scale"] = parse_scale(args["--scale"])
     if "--bundle" in args:
         if args["--lib"] or "--verilog" in args or "--sdc" in args:
             raise P2Error(None, None, "--bundle cannot be combined with --lib, --verilog or --sdc")
@@ -64,7 +67,7 @@ def main(argv):
     except tkinter.TclError as e:
         print("error: cannot open the viewer window: %s" % e, file=sys.stderr)
         return 1
-    App(root, source, args.get("--theme", "light"))
+    App(root, source, args.get("--theme", "light"), args.get("--scale"))
     root.mainloop()
     return 0
 

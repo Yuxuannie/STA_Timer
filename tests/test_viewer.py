@@ -13,7 +13,7 @@ import unittest
 
 from sta_toy import P2Error, bundle
 from sta_toy.tsv import fmt4
-from sta_toy.viewer import model, theme
+from sta_toy.viewer import model, sizing, theme
 from sta_toy.viewer.source import BundleSource, EngineSource
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -404,6 +404,35 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(theme.pick_font(("A", "B"), set()), "B")
 
 
+class SizingTests(unittest.TestCase):
+    """R32: the --scale value, the default scale and the window size, without Tk."""
+
+    def test_parse_scale(self):
+        self.assertEqual([sizing.parse_scale(t) for t in ("0.6", "1", "1.25", "2.0")], [0.6, 1.0, 1.25, 2.0])
+        for text in ("0.59", "2.01", "abc", "", "nan", "inf", "-1"):
+            with self.assertRaises(P2Error) as cm:
+                sizing.parse_scale(text)
+            self.assertEqual(str(cm.exception), "error: --scale needs a number from 0.6 to 2.0")
+
+    def test_default_scale(self):
+        self.assertEqual(sizing.default_scale("aqua", 1.3318), 1.0)
+        self.assertEqual(sizing.default_scale("x11", 96 / 72.0), 1.0)          # 96 dpi
+        self.assertEqual(sizing.default_scale("x11", 144 / 72.0), 1.5)
+        self.assertEqual((sizing.default_scale("x11", 4.0), sizing.default_scale("win32", 0.5)), (2.0, 0.6))
+
+    def test_geometry(self):
+        # The minimum is the three pane minimums and two dividers wide; header, status bar and
+        # the taller centre column (summary 90 + views 160 + table 80 + two dividers) high.
+        self.assertEqual(sizing.minimum(1.0), (280 + 460 + 320 + 6, 52 + 26 + 336))
+        # 1280x800 at scale 1: 92 % x 90 % of the screen, centred, and above the minimum.
+        self.assertEqual(sizing.geometry(1.0, 1280, 800), (1177, 720, 51, 40, 1066, 414))
+        self.assertEqual(sizing.geometry(1.0, 2560, 1440)[:2], (1520, 940))
+        self.assertEqual(sizing.geometry(1.0, 1440, 900)[:2], (1324, 810))
+        # A large scale on a small screen opens at the minimum, at the screen's left edge.
+        self.assertEqual(sizing.geometry(1.25, 1280, 800), (1333, 720, 0, 40, 1333, 517))
+        self.assertEqual(sizing.minimum(0.8), (852, 331))
+
+
 def run_viewer(*args):
     return subprocess.run([sys.executable, "-m", "sta_toy.viewer"] + list(args), cwd=ROOT,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
@@ -426,6 +455,14 @@ class ViewerCliTests(unittest.TestCase):
                          "error: --bundle cannot be combined with --lib, --verilog or --sdc")
         self.assertError(run_viewer("--lib", LIB, "--verilog", FF2_V, "--sdc", sdc("ff2_default"),
                                     "--theme", "neon"), "error: --theme needs one of light, dark, contrast")
+
+    def test_scale(self):
+        # R32: out of range or not a number, checked before the design is loaded.
+        for value in ("0.5", "2.1", "big"):
+            self.assertError(run_viewer("--lib", LIB, "--verilog", FF2_V, "--sdc", sdc("ff2_default"), "--scale", value),
+                             "error: --scale needs a number from 0.6 to 2.0")
+        self.assertError(run_viewer("--bundle", "missing.json", "--scale", "3"),
+                         "error: --scale needs a number from 0.6 to 2.0")
 
     def test_load_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -531,33 +568,72 @@ class TkSmokeTests(unittest.TestCase):
         self.assertTrue(any(e["name"] == "FF1" for e in app.layout["elements"]))
         self.assertEqual(app.errors, [])
 
+    def test_scale(self):
+        # R32: pixels times s, fonts times s on aqua (s / default elsewhere), minimum from the panes.
+        app = self.App(self.root, engine("ff2_default", "ff2"), "light", 1.25)
+        self.assertEqual((app.px(10), app.ipx(3)), (12.5, 4))
+        aqua = self.root.tk.call("tk", "windowingsystem") == "aqua"
+        if aqua:
+            self.assertEqual(app.font("ui", 12).actual("size"), 15)
+        self.assertEqual(self.root.wm_minsize(), sizing.minimum(1.25))
+        self.assertEqual(int(app.body.panecget(app.insp, "minsize")), 400)
+        self.assertEqual(app.errors, [])
+
     def test_no_label_overlaps(self):
-        """Every endpoint, check, view and path stage, with every side input expanded once:
-        no two texts on one canvas overlap (1 px tolerance across, 2 px down)."""
-        app = self.App(self.root, engine("s27", "s27"), "light")
-        self.root.geometry("1520x940")
+        """R32: every design, endpoint, check, view and path stage, with every side input
+        expanded once, at UI scales 0.8 / 1.0 / 1.25 and window widths 1100 / 1280 / 1520: no
+        two texts on one canvas overlap (1 px tolerance across, 2 px down) and none is cut off
+        (each lies inside its canvas, or inside the scroll region of a scrolling one)."""
+        for scale in (0.8, 1.0, 1.25):
+            for width in (1100, 1280, 1520):
+                for scenario, netlist in DESIGNS:
+                    self.check_texts(engine(scenario, netlist), scale, width, scenario)
+
+    def check_texts(self, src, scale, width, scenario):
+        app = self.App(self.root, src, "light", scale)
+        self.root.geometry("%dx940" % width)
+        self.root.deiconify()               # mapped, so every canvas has its real size
         self.root.update()
-        canvases = (app.header, app.hist, app.plist, app.summary_cv, app.tabs, app.view, app.table, app.insp)
+        self.assertEqual(self.root.winfo_width(), max(width, sizing.minimum(scale)[0]))
+        canvases = (app.header, app.hist, app.list_head, app.plist, app.summary_cv, app.tabs, app.view, app.table,
+                    app.insp, app.status)
         for row in app.endpoints.rows:
             for check in ("setup", "hold"):
                 app.select_endpoint(row["pin"])
                 app.set_check(check)
                 for stub in [s["pin"] for s in app.layout["stubs"] if s["state"] == "expand"] if app.layout else []:
                     app.expand(stub)
-                for tab in ("schematic", "waveform"):
+                for tab in ("waveform", "schematic"):
                     app.set_tab(tab)
-                    for k in range(len(app.path()["points"])) if app.path() else [None]:
-                        if k is not None:
-                            app.select_stage(k)
-                        for cv in canvases:
-                            boxes = [(cv.itemcget(i, "text"), cv.bbox(i)) for i in cv.find_all()
-                                     if cv.type(i) == "text" and cv.itemcget(i, "text").strip()]
-                            for n, (ta, a) in enumerate(boxes):
-                                for tb, b in boxes[n + 1:]:
-                                    self.assertFalse(a[0] + 1 < b[2] - 1 and b[0] + 1 < a[2] - 1 and
-                                                     a[1] + 2 < b[3] - 2 and b[1] + 2 < a[3] - 2,
-                                                     (row["pin"], check, tab, k, ta, tb))
+                    if tab == "waveform":
+                        self.root.update_idletasks()    # pane sizes settle (the summary grows to fit)
+                    for cv in canvases:
+                        self.check_canvas(cv, (scenario, scale, width, row["pin"], check, tab))
+                # A stage changes only the schematic, the table and the inspector (the same in
+                # both views), so the stages are stepped in the schematic.
+                for k in range(len(app.path()["points"])) if app.path() else []:
+                    app.select_stage(k)
+                    for cv in (app.view, app.table, app.insp):
+                        self.check_canvas(cv, (scenario, scale, width, row["pin"], check, k))
+        if app._static_job is not None:
+            self.root.after_cancel(app._static_job)
         self.assertEqual(app.errors, [])
+
+    def check_canvas(self, cv, where):
+        boxes = [(cv.itemcget(i, "text"), cv.bbox(i)) for i in cv.find_all()
+                 if cv.type(i) == "text" and cv.itemcget(i, "text").strip()]
+        for n, (ta, a) in enumerate(boxes):
+            for tb, b in boxes[n + 1:]:
+                self.assertFalse(a[0] + 1 < b[2] - 1 and b[0] + 1 < a[2] - 1 and
+                                 a[1] + 2 < b[3] - 2 and b[1] + 2 < a[3] - 2, where + (ta, tb))
+        region = cv.cget("scrollregion")
+        if region:
+            x0, y0, x1, y1 = [float(v) for v in region.split()]
+        else:
+            x0, y0, x1, y1 = 0, 0, cv.winfo_width(), cv.winfo_height()
+        for text, (a0, b0, a1, b1) in boxes:
+            self.assertTrue(x0 - 1 <= a0 and a1 <= x1 + 1 and y0 - 1 <= b0 and b1 <= y1 + 1,
+                            where + (str(cv), text, (a0, b0, a1, b1), (x0, y0, x1, y1)))
 
 
 if __name__ == "__main__":
