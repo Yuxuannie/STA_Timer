@@ -18,7 +18,9 @@ abspath() { (cd "$(dirname "$1")" && echo "$(pwd)/$(basename "$1")"); }
 
 if [ "$1" = "--probe" ]; then
   TMP=$(mktemp -d)
-  REF_PROBE=1 REF_LIB=$LIB REF_OUT=$TMP "$STA" -no_init -no_splash -exit "$HERE/run.tcl" > "$TMP/sta.log" 2>&1
+  # run.tcl is passed by a relative name from its own directory: OpenSTA's -exit splits a
+  # script path that contains a space (e.g. a checkout under "7-STA Timer").
+  (cd "$HERE" && REF_PROBE=1 REF_LIB=$LIB REF_OUT=$TMP "$STA" -no_init -no_splash -exit run.tcl) > "$TMP/sta.log" 2>&1
   rc=$?
   grep -q '^probe ok' "$TMP/sta.log" || rc=1
   if [ $rc -eq 0 ]; then cat "$TMP/version.txt"; else cat "$TMP/sta.log" >&2; fi
@@ -35,8 +37,10 @@ mkdir -p "$3" || exit 1
 OUT=$(cd "$3" && pwd)
 VERILOG=$(abspath "$1")
 TOP=$(basename "$1" .v)
-REF_LIB=$(abspath "$LIB") REF_VERILOG=$VERILOG REF_TOP=$TOP REF_SDC=$(abspath "$2") REF_OUT=$OUT \
-  "$STA" -no_init -no_splash -exit "$HERE/run.tcl" > "$OUT/sta.log" 2>&1
+LIB=$(abspath "$LIB")
+SDC=$(abspath "$2")
+(cd "$HERE" && REF_LIB=$LIB REF_VERILOG=$VERILOG REF_TOP=$TOP REF_SDC=$SDC REF_OUT=$OUT \
+  "$STA" -no_init -no_splash -exit run.tcl) > "$OUT/sta.log" 2>&1
 rc=$?
 if [ $rc -ne 0 ] || grep -q '^Error' "$OUT/sta.log"; then
   echo "error: OpenSTA failed on $VERILOG (see $OUT/sta.log)" >&2
