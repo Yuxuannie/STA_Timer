@@ -70,18 +70,28 @@ Debugging an endpoint: on the left, the slack histogram of the check chosen in t
 (Setup / Hold; click a bar to filter) and every endpoint, worst slack first. The centre opens
 with the endpoint's slack worked out term by term (input delay or launch latency + ck→q + data
 path = arrival; edge + capture latency − setup time − uncertainty = required, or + hold time +
-uncertainty for hold), then three
+uncertainty for hold), then two
 views of the worst path: *Schematic* (gate symbols wired pin to pin, the critical path in the
-accent colour, each cell's `+delay`, each output's arrival), *Waveform* (both clocks, the data
-window, the setup and hold windows and slacks) and *Profile* (where the path spends its time),
-and under them the path table in three sections (source clock, data path, destination clock)
-with load, slew, incr, AT, RAT and pin slack. ←/→ walk the signal pin to pin, ↑/↓ change
-endpoint, S / H the check, 1 / 2 / 3 the view. A side input ends in ⊕: click it to draw the
+accent colour, each cell's `+delay`, each output's arrival) and *Waveform* (both clocks with
+their rising edges labelled, the data window, the setup and hold windows and slacks), and under
+them the path table in three sections (source clock, data path, destination clock) with load,
+fanout, slew, incr (the largest cell delay in bold), AT, RAT and pin slack. ←/→ walk the signal
+pin to pin, ↑/↓ change endpoint, S / H the check, 1 / 2 the view. A side input ends in ⊕: click it to draw the
 cell driving it (and keep digging backwards); ↺ marks a side input whose driver is already on
 screen. Click a pin: the inspector shows its AT / RAT / slew, the lookup behind its delay
-(input slew and load → delay) and which input set its arrival and which fanout set its
-required time, with each loser's margin. Drag any divider to resize; `[` and `]` hide the side
+(input slew and load → delay, with the table's grid cell and `extrapolated below` / `above`
+when the query is outside the table; engine mode only) and which input set its arrival and which fanout set its
+required time, with each loser's margin (near-critical: under 1 % of the period). Drag any divider to resize; `[` and `]` hide the side
 panels. Themes: light, dark, contrast (header switch or `--theme`).
+
+`python -m sta_toy.viewer ... [--scale S]` sets the UI scale (0.6 to 2.0). The default is
+1.0 on macOS, and elsewhere comes from the display's DPI. The window opens at most 92 % x
+90 % of the screen and is centred, so it fits on a 1280x800 laptop. The Profile view is
+gone: keys `1` and `2` switch between schematic and waveform, and the path table shows the
+largest cell delay in bold. In engine mode, the inspector shows the table lookup grid behind
+each delay, output slew and setup / hold time, and marks queries outside the table as
+`extrapolated below` / `above`. The path table and the inspector also show each driving
+pin's fanout.
 
 ## Engine health, trace and units (stage P5)
 
