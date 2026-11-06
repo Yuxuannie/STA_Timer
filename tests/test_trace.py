@@ -90,6 +90,13 @@ class TraceGoldenTests(GoldenDiff):
                 self.assertEqual(tsv.tables(timed(verilog, scenario, [])),
                                  tsv.tables(timed(verilog, scenario)))
 
+    def test_candidates_outside_the_cone_are_kept(self):
+        # trace.md "Filtering": an entry keeps every candidate of its merge, in or out of the cone.
+        result = run_cli(*(ARGS + ["--trace", "y"]))
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b"FF2/Q late r rat 8.0000\n    FF1/D(r) 9.7000 - 0.0000 = 9.7000\n  * y(r) 8.0000",
+                      result.stdout)
+
     def test_stdout_order(self):
         both = run_cli(*(ARGS + ["--trace", "FF2/D", "--check-timing", "--report-summary"]))
         parts = [run_cli(*(ARGS + [o])).stdout for o in ("--report-summary", "--check-timing")]

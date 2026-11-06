@@ -61,7 +61,8 @@ the check arcs from that pin) when both ends are kept.
 ## Changes in P5 (2026-11-05)
 
 - Node field `fanout` (R34): the number of net arcs leaving the pin in the whole design
-  (not only inside the cone), null when the pin drives no net (input pins, D pins,
-  output ports). Additive; the schema string stays `sta_toy.bundle/1`. Why: the viewer
+  (not only inside the cone), null when the pin has no timed net arcs (input pins, D
+  pins, output ports; the clock port, whose net is not in the timing graph,
+  p2_semantics.md §2, is never a cone node, and would be null). Additive; the schema string stays `sta_toy.bundle/1`. Why: the viewer
   shows fanout beside `load`, and a bundle's edges stop at the cone, so counting them
   would undercount. Older bundles without the field load; the viewer shows no fanout.

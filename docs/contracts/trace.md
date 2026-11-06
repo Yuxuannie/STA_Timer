@@ -34,7 +34,10 @@ topological order, then whatever slack / path calls follow.
 
 The trace keeps the entries whose `pin` is in the endpoint's cone: the fan-in cone of
 `bundle._cone` with unlimited depth, which includes the capture CK pins of a D
-endpoint. Check, slack and path entries are kept only for the endpoint itself. After
+endpoint. Candidates are not filtered: a kept entry lists all its candidates, also those
+outside the cone (with `--trace y` on ff2_default, `FF2/Q`'s backward block lists
+`FF1/D(r)`), because the merge was over all of them (added after the P5 review). Check,
+slack and path entries are kept only for the endpoint itself. After
 the run, the CLI calls `timer.slack(e, kind, rf, log)` for `kind` in setup, hold and
 `rf` in r, f, then `timer.worst_path(e, kind, worst_rf(e, kind), log)` for setup then
 hold when that transition exists. The formatter never calls `lookup`, never computes a
