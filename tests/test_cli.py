@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -82,6 +83,77 @@ class GoldenTests(TempDirTest):
     def test_second_library(self):
         # Repeated --lib: cells come from every library, first one wins.
         self.check("ff2_default", "ff2.v", "ff2_default.sdc", os.path.join(ROOT, "data", "toy.lib"))
+
+
+class UnitTests(TempDirTest):
+    """R37 (cli_p5.md "Library units"): a second library in ps / fF is converted to the
+    main library's ns / pF; a library without units is an error."""
+
+    def psff(self):
+        path = os.path.join(self.tmp, "toy2_psff.lib")
+        with open(path, "w") as f:
+            subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_toy2_lib.py"),
+                            "--time", "ps", "--cap", "ff", "--suffix", "_P"], stdout=f, check=True)
+        return path
+
+    def test_converted_library(self):
+        with open(FF2_V) as f:
+            text = f.read()
+        for cell in ("BUF  ", "NAND2", "DFF  "):
+            text = text.replace("  %s " % cell, "  %s_P " % cell.strip())
+        self.assertEqual(text.count("_P "), 4)
+        v = self.write("ff2_p.v", text)
+        out = os.path.join(self.tmp, "out")
+        result = run_cli("--lib", TOY2_LIB, "--lib", self.psff(), "--verilog", v,
+                         "--sdc", os.path.join(ROOT, "data", "sdc", "ff2_default.sdc"),
+                         "--dump-tsv", out, "--json", os.path.join(self.tmp, "r.json"))
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+        with open(os.path.join(out, "endpoints.tsv"), "rb") as f, \
+                open(os.path.join(ROOT, "tests", "golden", "ff2_default", "endpoints.tsv"), "rb") as g:
+            self.assertEqual(f.read(), g.read())
+        diff = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "diff_ref.py"),
+                               os.path.join(ROOT, "tests", "golden", "ff2_default"), out,
+                               "--tol", "0"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertEqual(diff.returncode, 0, diff.stdout.decode())
+        with open(os.path.join(self.tmp, "r.json")) as f:
+            self.assertEqual(json.load(f)["design"]["units"], {"time": "1ns", "cap": "1pf"})
+
+    def test_without_conversion_the_numbers_would_be_wrong(self):
+        # The same netlist with the ps / fF library alone, ns SDC numbers: not ff2_default.
+        with open(FF2_V) as f:
+            text = f.read().replace("BUF  ", "BUF_P").replace("NAND2", "NAND2_P").replace("DFF  ", "DFF_P")
+        out = os.path.join(self.tmp, "out")
+        run_cli("--lib", self.psff(), "--verilog", self.write("ff2_p.v", text),
+                "--sdc", os.path.join(ROOT, "data", "sdc", "ff2_default.sdc"), "--dump-tsv", out)
+        with open(os.path.join(out, "endpoints.tsv"), "rb") as f, \
+                open(os.path.join(ROOT, "tests", "golden", "ff2_default", "endpoints.tsv"), "rb") as g:
+            self.assertNotEqual(f.read(), g.read())
+
+    def test_missing_units(self):
+        with open(TOY2_LIB) as f:
+            text = f.read()
+        for old, what in (('  time_unit : "1ns";\n', "time_unit"),
+                          ("  capacitive_load_unit (1, pf);\n", "capacitive_load_unit")):
+            with self.subTest(unit=what):
+                self.assertEqual(text.count(old), 1)
+                lib = self.write("nounit.lib", text.replace(old, ""))
+                # As the main library, as a second one, and without --sdc (stage 1 run).
+                for libs in ([lib], [TOY2_LIB, lib]):
+                    args = [a for path in libs for a in ("--lib", path)] + ["--verilog", FF2_V]
+                    for extra in ([], ["--sdc", os.path.join(ROOT, "data", "sdc", "ff2_default.sdc"),
+                                       "--report-summary"]):
+                        stderr = self.assertOneLineError(run_cli(*(args + extra)))
+                        self.assertEqual(stderr, "%s: library toy2: missing %s\n" % (lib, what))
+
+    def test_unit_error_order(self):
+        # Library errors come library by library: the first library's missing unit is
+        # reported before a parse error in the second.
+        with open(TOY2_LIB) as f:
+            text = f.read()
+        first = self.write("a.lib", text.replace('  time_unit : "1ns";\n', ""))
+        second = self.write("b.lib", "library (b) {\n")
+        stderr = self.assertOneLineError(run_cli("--lib", first, "--lib", second, "--verilog", FF2_V))
+        self.assertEqual(stderr, "%s: library toy2: missing time_unit\n" % first)
 
 
 class SdcSemanticErrorTests(TempDirTest):
@@ -174,9 +246,15 @@ class ErrorContractTests(TempDirTest):
         self.assertEqual(text.count("timing_type : rising_edge;"), 1)
         lib = self.write("falling.lib", text.replace("timing_type : rising_edge;",
                                                      "timing_type : falling_edge;"))
+        # R35 (cli_p5.md): no longer an error; the arc is ignored, counted and listed.
         result = self.timing(FF2_V, CLOCK, lib=lib)
-        self.assertOneLineError(result, r"^%s:\d+: cell DFF pin Q: unsupported timing_type falling_edge\n$"
-                                % re.escape(lib))
+        self.assertEqual((result.returncode, result.stdout), (0, b""))
+        self.assertEqual(result.stderr, b"warning: 2 timing arcs ignored (run --check-timing)\n")
+        result = run_cli("--lib", lib, "--verilog", FF2_V, "--sdc", os.path.join(self.tmp, "c.sdc"),
+                         "--check-timing")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b"\nignored timing arcs: 2\n  DFF Q CK falling_edge 2\nlookups outside",
+                      result.stdout)
 
 
 class ForwardTieTests(TempDirTest):
