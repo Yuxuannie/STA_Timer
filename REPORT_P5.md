@@ -14,7 +14,7 @@ Branch p5-ref @ (see `git log`); worker branches p5-viewer @ 785073d, p5-engine 
 | R39 | done | 66632d7, 8b8af9b, 4b33b9e (merged), 588f756 (lead: run.sh path fix) | W3; OpenSTA 3.1.0 source build in 25 of 90 min; s1423 kept as a snapshot (oracle rule) |
 | R40 | done | 3ff042e | lead; 5 policy classes, 0 toy-bug, 0 adapter (numbers); cases in `ref/cases/` |
 | R41 | pending | | lead, optional |
-| R42 | pending | | lead, optional |
+| R42 | done | d9d8d68, c4024a1 | lead; regex tokenizer, stream-identical; ×500 library parse 3.23 → 2.22 s (python3), 1.84 → 1.60 s (python3.12) |
 | R43 | pending | | lead |
 
 ## 2. Tests
@@ -22,7 +22,8 @@ before (viewer-v2 @ ed316ad): 155 (4 skipped) on /usr/bin/python3 (3.9.6), 155 (
 after interface commit bbb685d: 159 (4 skipped) / 159 (1 skipped) — 4 new lookup_detail tests
 after merge of p5-engine: 183 (4 skipped) / 183 (1 skipped)
 after merge of p5-viewer + bundle fanout: 194 (6 skipped) / 194 (2 skipped)
-after merge of p5-opensta + R40 cases: 214 (6 skipped) / 214 (1 skipped) — the OpenSTA tests (test_ref.OpenStaTests, test_ref_cases) and the s1423 Tk smoke test run
+after merge of p5-opensta + R40 cases: 214 (6 skipped) / 214 (1 skipped)
+after reviewer fixes: 215 / 215; after R42: 221 (6 skipped) / 221 (1 skipped) — the OpenSTA tests (test_ref.OpenStaTests, test_ref_cases) and the s1423 Tk smoke test run
 skips: /usr/bin/python3 skips the 5 `TkSmokeTests` (Tk cannot open a window) and `ViewerCliTests.test_no_tkinter` (this Python has tkinter); python3.12 skips only `test_no_tkinter`
 time: /usr/bin/python3 ≈ 11 s; python3.12 ≈ 190 s (almost all in W1's mapped-window overlap / cut-off check)
 commands:
@@ -151,7 +152,16 @@ setup WNS −3.7856 = −5.0 % of the period, hold met. `--check-timing` on s142
 
 Engine run time on s1423 with `--dump-tsv` (wall clock, `/usr/bin/time -p`, this Mac): 0.32 s (`/usr/bin/python3`), 0.19 s (python3.12); W3 measured 0.8 s / 1.2 s on its first run. Bound: 5 s.
 
-R42 (tokenizer): not done (§9).
+R42 (tokenizer, `tools/bench_parse.py`). Input: `out/toy2_x500.lib` (8 056 136 bytes: toy2.lib's header and 500 renamed copies of its seven cells, 3 500 cells; generated, not committed — §10), and `data/toy2.lib` (18 480 bytes). `--repeat 3` / `--repeat 50`, best of the runs, this Mac:
+
+| file | interpreter | before (d9d8d68) | after (c4024a1) | peak RSS before → after |
+|---|---|---|---|---|
+| toy2_x500.lib | /usr/bin/python3 3.9.6 | 3.231 s | 2.224 s (−31 %) | 168.3 → 180.0 MB |
+| toy2_x500.lib | python3.12 | 1.840 s | 1.604 s (−13 %) | 163.4 → 175.4 MB |
+| toy2.lib | /usr/bin/python3 | 0.006 s | 0.004 s | 9.3 → 9.4 MB |
+| toy2.lib | python3.12 | 0.003 s | 0.003 s | 11.9 → 12.0 MB |
+
+The rest of the parse time is the parser and tree building, which R42 does not touch. Peak RSS grew by about 12 MB on the large file: the regex match objects and slices are allocated per token; `parse()` still materialises the token list (see §6), so streaming does not lower the peak.
 
 ## 6. Decisions I made (ambiguities resolved on my own)
 Lead:
@@ -164,6 +174,9 @@ Lead:
 7. R40 classification of the CK-pin values. I first classed CK-pin slew / arrival as `policy`; the reviewer (§8.1) showed OpenSTA's own model agrees with the toy there (`report_checks` prints the 0.05 clock transition at the CK pin and "clock network delay (ideal) 3.5"; `report_dcalc -from FF2/CK -to FF2/Q` uses input_net_transition 0.05) and only the adapter's `get_property` read of the graph vertex differs. Reclassified: P5-1a `adapter` (CK slew, CK arrival with latency), P5-1b `policy` (CK fall arrival at T/2, clock-port values). The P5-1a fix is golden-neutral but not cheap (the Tcl path API exposes no slew and keeps the ideal latency as a separate term), so under step 7's 30-minute rule it is left open with its route (§7.1, §8.1).
 8. The `run.sh` path fix (588f756) is the only lead fix under R40: an `adapter` (infrastructure) defect. No `toy-bug` was found, so no engine code changed under R40.
 9. R40 evidence: besides the smallest cases I ran copies of three P2 SDC files with the P5-2..P5-4 policies neutralised (`ref/cases/aligned/`) — the P2 SDC files themselves are untouched (N34).
+10a. R41 was delegated to W1 (who wrote the viewer code) on a new branch `p5-trace`, with the brief verbatim and a hard two-hour box (23:33–01:30), while I did R42 in parallel on p5-ref (disjoint files: `sta_toy/liberty.py`, `tests/test_tokenizer.py`, `tools/bench_parse.py`). R41's outcome is in §1 / §9.
+10b. R42 "streaming generator" with "nothing else in the parser changes": `_tokenize` is a generator, and `parse()` wraps it in `list()` — the one-line change that keeps the parser's indexed lookahead and keeps every tokenizer error ahead of every parse error, as before (a lazily consumed stream would report a parse error first when a file has both). `_continuation_end`, used only by the old loop, moved with it into the test's reference copy.
+10c. "Every error case of the existing tests": the test runs the Liberty-parsing test modules (`test_liberty`, `test_graph`, `test_lookup`) with a recorder in place of `_tokenize` and compares the streams of every text they parse; the existing tests have no tokenizer-level error case, so four explicit ones (unterminated comment / string, stray backslash twice) and 3 000 seeded random texts are added.
 
 Engine (W2; recorded in DECISIONS.md R35–R37 and its contracts):
 10. "D pins whose capture CK pin has no arrival": every CK pin gets the ideal-clock arrival (p2_semantics.md §5), so this never happens literally; read as the parenthesis says — a CK pin that is not a load of the clock port's net is *unclocked*. Such a register is still timed (N30), and `--check-timing` lists it.
@@ -258,3 +271,6 @@ From the repo root on `p5-ref` (OpenSTA at `~/tools/opensta/build/sta`, else set
     python3 -m sta_toy --lib data/toy2.lib --verilog data/s1423.v --sdc data/sdc/s1423.sdc --report-summary
     /usr/bin/time -p python3 -m sta_toy --lib data/toy2.lib --verilog data/s1423.v --sdc data/sdc/s1423.sdc --dump-tsv out/s1423
     python3 tools/bench2v.py data/bench/s1423.bench out/s1423.v --top s1423 && cmp out/s1423.v data/s1423.v
+    # §5 R42: the ×500 library, then the benchmark before (d9d8d68) and after (c4024a1)
+    python3 -c "import re; t=open('data/toy2.lib').read(); h=t.index('  cell (BUF) {'); e=t.rindex('}'); c=t[h:e]; open('out/toy2_x500.lib','w').write(t[:h]+''.join(re.sub(r'^  cell \((\w+)\) \{', lambda m: '  cell (%s_K%d) {' % (m.group(1), k), c, flags=re.M) for k in range(500))+t[e:])"
+    for c in d9d8d68 c4024a1; do git checkout -q $c; for py in /usr/bin/python3 ~/.local/bin/python3.12; do $py tools/bench_parse.py out/toy2_x500.lib --repeat 3; $py tools/bench_parse.py data/toy2.lib --repeat 50; done; done; git checkout -q p5-ref
