@@ -455,6 +455,12 @@ def near_critical(period):
     return 0.01 * period
 
 
+def is_near(margin, period):
+    """A losing candidate is near-critical when its margin is under near_critical(period) by
+    more than 1e-9 (a margin equal to the threshold is not)."""
+    return margin < near_critical(period) - 1e-9
+
+
 def _edge_labels(row, span, lines, text_width, units):
     """[(t, text, anchor)] for every rising edge t of a clock row inside the span: right of
     the edge (anchor w) or else left of it (anchor e, not before the span start); dropped if

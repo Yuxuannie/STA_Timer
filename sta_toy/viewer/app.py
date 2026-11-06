@@ -1274,7 +1274,7 @@ class App:
             e = self._text(cv, P(34), yy + P(17), expr, "mono", 10, False, "faint")
             extra = 0                    # the margin goes under the expression when both do not fit
             if not win:
-                near = cand["margin"] < limit - 1e-9
+                near = model.is_near(cand["margin"], self.source.period)
                 margin = "Δ %s" % fmt4(cand["margin"])
                 if cv.bbox(e)[2] + P(8) > w - P(20) - self.font("mono", 10).measure(margin):
                     extra = P(15)

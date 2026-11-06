@@ -448,6 +448,9 @@ class ViewModelTests(unittest.TestCase):
     def test_near_critical(self):
         # R33: 1 % of the clock period (was the constant 0.05).
         self.assertEqual(fmt4(model.near_critical(engine("s27", "s27").period)), "0.1000")
+        # The inspector colours a margin by is_near: under 0.1 at period 10, not at it.
+        self.assertEqual([model.is_near(m, 10.0) for m in (0.0999, 0.1, 0.05, 0.2)],
+                         [True, False, True, False])
 
 
 class ThemeTests(unittest.TestCase):

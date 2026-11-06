@@ -78,7 +78,8 @@ questions:
   (setup path) arrival, and per check a mark with its window, required time, arrival and slack;
   each clock row carries its edge `labels` (P5, R33).
 - `lookups(path, source, k)`: the lookup grids behind path point `k` (P5, R34);
-  `near_critical(period)`: the merge margin under which a candidate is near-critical (P5, R33).
+  `near_critical(period)`: the merge margin under which a candidate is near-critical, and
+  `is_near(margin, period)` (P5, R33).
 - `schematic(path, source, expanded)`: the drawing, deterministic, pixel coordinates at zoom 1:
   - Grid of columns `W_MOD + GAP` wide. Lane 0 holds the path left to right, one element per
     column: a port for a PI start / PO end, a module per cell hop, the launch flop for a CK
@@ -203,7 +204,9 @@ fixed minimum of 1200x760, larger than a 1280x800 or 1440x900 laptop screen.
   `ff2_holdviol` `FF2/D`: the capture labels are `3.5000` and `13.5000`.
 - Near-critical threshold in the inspector merges: a margin under 1 % of the clock period
   (`model.near_critical(period)`, compared with 1e-9 tolerance) instead of the constant
-  0.05; each merge heading shows it (`margin < 0.1000` at period 10).
+  0.05; each merge heading shows it (`margin < 0.1000` at period 10). `model.is_near(margin,
+  period)` decides it: `margin < near_critical(period) − 1e-9`, so a margin equal to the
+  threshold is not near-critical (added after the P5 review).
 
 **R34 - inspector: lookup grid and fanout.**
 - `EngineSource.arc_lookup(from_pin, to_pin, check, rf_from, rf_to)` -> `{"delay": d,
