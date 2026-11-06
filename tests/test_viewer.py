@@ -2,26 +2,30 @@
 path schematic, sources, themes, the viewer CLI and a Tk smoke test. Expected values come
 from the contract by hand and from the P2 golden files."""
 
+import copy
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from sta_toy import P2Error, bundle
 from sta_toy.tsv import fmt4
-from sta_toy.viewer import model, theme
+from sta_toy.viewer import model, sizing, theme
 from sta_toy.viewer.source import BundleSource, EngineSource
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "data", "toy2.lib")
 FF2_V = os.path.join(ROOT, "data", "ff2.v")
+S1423 = (os.path.join(ROOT, "data", "s1423.v"), os.path.join(ROOT, "data", "sdc", "s1423.sdc"))   # W3, R38
 DESIGNS = [("ff2_default", "ff2"), ("ff2_swap", "ff2"), ("ff2_setupviol", "ff2"),
            ("ff2_holdviol", "ff2"), ("ff2_skew", "ff2"), ("ff2_unc", "ff2"),
            ("inv2", "inv2"), ("s27", "s27")]
 MODE = {"setup": "late", "hold": "early"}
+THIN = "\u2009"
 _SOURCES = {}
 
 
@@ -251,28 +255,16 @@ class SourceTests(unittest.TestCase):
         self.assertIsNone(b.summary("setup"))
 
     def test_bundle_without_instances(self):
-        # A bundle written before "instances" existed still loads; its cells show the pins it mentions.
-        src = engine("s27", "s27")
-        b = bundle.debug_bundle(src.g, "FF5/D", depth=1)
+        # R33: the P4 compatibility path is gone; such a bundle is an error again.
+        b = bundle.debug_bundle(engine("s27", "s27").g, "FF5/D", depth=1)
         del b["instances"]
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "old.json")
             with open(path, "w") as f:
                 json.dump(b, f)
-            old = BundleSource(path)
-        self.assertIn("written before cells were stored", old.note)
-        # U10 is inside the depth-1 cone: all its pins. U9 is known only from path points
-        # (U9/A is three cell arcs back), so it shows just B and Y.
-        self.assertEqual(old.instance("U10"), {"cell": "NOR2", "sequential": False, "pins": [
-            {"name": "A", "direction": "input", "clock": False, "function": None},
-            {"name": "B", "direction": "input", "clock": False, "function": None},
-            {"name": "Y", "direction": "output", "clock": False, "function": None}]})
-        self.assertEqual([p["name"] for p in old.instance("U9")["pins"]], ["B", "Y"])
-        self.assertEqual([(p["name"], p["direction"], p["clock"]) for p in old.instance("FF5")["pins"]],
-                         [("CK", "input", True), ("D", "input", False)])
-        sch = model.schematic(old.paths("FF5/D")["setup"], old, ["U9/A"])
-        self.assertEqual([e["name"] for e in sch["elements"]][:8],
-                         ["G0", "U14", "U8", "U15", "U9", "U11", "U10", "FF5"])
+            with self.assertRaises(P2Error) as cm:
+                BundleSource(path)
+            self.assertEqual(str(cm.exception), "error: bundle has no instances: write it again with --bundle")
 
     def test_merges(self):
         src = engine("s27", "s27")
@@ -334,13 +326,6 @@ class ViewModelTests(unittest.TestCase):
                          [("-0.3000", "0.7000", 1), ("0.7000", "1.7000", 1), ("1.7000", "2.7000", 1)])
         self.assertEqual(model.histogram([None]), [])
 
-    def test_profile(self):
-        path = engine("s27", "s27").paths("FF5/D")["setup"]
-        bars = model.profile(path)
-        self.assertEqual([b["label"] for b in bars[:3]], ["input delay", "U14 INV A→Y", "U8 AND2 A→Y"])
-        self.assertEqual(fmt4(bars[4]["delay"]), "2.0120")
-        self.assertEqual(fmt4(sum(b["delay"] for b in bars)), fmt4(path["arrival"]))
-
     def test_path_table(self):
         src = engine("s27", "s27")
         pins = golden("s27", "pins.tsv")
@@ -356,6 +341,18 @@ class ViewModelTests(unittest.TestCase):
                           "library setup time"])
         flop = model.path_table(engine("ff2_default", "ff2").paths("FF2/D")["hold"], engine("ff2_default", "ff2"))
         self.assertEqual([r["label"] for r in flop[0]["rows"]], ["clock clk (rise edge)", "clock latency (ideal)", "FF1/CK"])
+
+    def test_path_table_largest(self):
+        # R33: the largest cell incr of the data path is marked (U10 NOR2 B->Y, 2.0120 in s27
+        # FF5/D setup); ties mark all (ff2_holdviol FF2/D hold: CK->Q 1.0 vs NAND 2.0 -> one).
+        rows = model.path_table(engine("s27", "s27").paths("FF5/D")["setup"], engine("s27", "s27"))[1]["rows"]
+        self.assertEqual([(r["label"], fmt4(r["incr"])) for r in rows if r["largest"]], [("U9/Y", "2.0120")])
+        path = copy.deepcopy(engine("s27", "s27").paths("FF5/D")["setup"])
+        for q in path["points"]:
+            if q["pin"] == "U14/Y":
+                q["incr"] = 2.0120 + 1e-10                 # a tie within 1e-9
+        rows = model.path_table(path, engine("s27", "s27"))[1]["rows"]
+        self.assertEqual([r["label"] for r in rows if r["largest"]], ["U14/Y", "U9/Y"])
 
     def test_waveform(self):
         src = engine("ff2_skew", "ff2")
@@ -373,6 +370,84 @@ class ViewModelTests(unittest.TestCase):
         setup_view = model.waveform(p["setup"], p["hold"], src.period, "setup")
         self.assertEqual(setup_view["rows"][0]["pin"], "x")
 
+    def test_waveform_edge_labels(self):
+        # R33: every rising edge in the span is labelled with its time; ff2_holdviol FF2/D:
+        # capture edges 3.5 and 13.5 (latency 3.5), never the falling edge 8.5.
+        src = engine("ff2_holdviol", "ff2")
+        p = src.paths("FF2/D")
+        for check in ("setup", "hold"):
+            rows = model.waveform(p["setup"], p["hold"], src.period, check)["rows"]
+            self.assertEqual([text for _, text, _ in rows[1]["labels"]], ["3.5000", "13.5000"])
+            self.assertEqual([text for _, text, _ in rows[0]["labels"]], ["0.0000", "10.0000"])
+        # With real widths (span 14.58 over 600 px, labels 48 px = 1.166 time units): 3.5 would
+        # cover the hold mark line at 3.6, so it goes left of its edge; 13.5 stays right of it
+        # (the setup line at 13.2 lies left of the edge).
+        wave = model.waveform(p["setup"], p["hold"], src.period, "hold", lambda text: 48, 600)
+        self.assertEqual(wave["rows"][1]["labels"], [(3.5, "3.5000", "e"), (13.5, "13.5000", "w")])
+        # Labels so wide that both sides of 3.5 hit a line or the span start: dropped.
+        wave = model.waveform(p["setup"], p["hold"], src.period, "hold", lambda text: 240, 600)
+        self.assertEqual([text for _, text, _ in wave["rows"][1]["labels"]], ["13.5000"])
+        self.assertEqual([text for _, text, _ in wave["rows"][0]["labels"]], ["0.0000", "10.0000"])
+
+    def blocks(self, scenario, netlist, endpoint, check, pin):
+        src = engine(scenario, netlist)
+        path = src.paths(endpoint)[check]
+        k = [q["pin"] for q in path["points"]].index(pin)
+        return path["points"][k], model.lookups(path, src, k)
+
+    def test_lookup_blocks(self):
+        # R34: the grid behind each lookup, at the arguments the engine used (the block's value
+        # is the path's number). Slew axis below the grid where the source slew is 0: the CK pin
+        # (s27 has no set_clock_transition) and G2 (no set_input_transition).
+        slew = lambda d: d["extrapolated"][d["axes"].index("input_net_transition")]
+        for endpoint, check, pin in (("FF7/D", "setup", "FF7/Q"), ("FF7/D", "hold", "U13/Y")):
+            point, blocks = self.blocks("s27", "s27", endpoint, check, pin)
+            self.assertEqual([label for label, _ in blocks], ["delay", "output slew"])
+            self.assertEqual([slew(d) for _, d in blocks], ["below", "below"])
+            self.assertEqual(fmt4(blocks[0][1]["value"]), fmt4(point["incr"]))
+        # U14 is driven by G0 (slew 0.05): inside the grid; FF2/D's setup lookup has its CK
+        # slew 0.05 inside too, s27 FF5/D's CK slew 0 is below.
+        point, blocks = self.blocks("s27", "s27", "FF5/D", "setup", "U14/Y")
+        self.assertEqual([d["extrapolated"] for _, d in blocks], [[None, None], [None, None]])
+        self.assertEqual((fmt4(blocks[0][1]["value"]), fmt4(blocks[1][1]["value"])), (fmt4(point["incr"]), fmt4(point["slew"])))
+        point, blocks = self.blocks("s27", "s27", "FF5/D", "setup", "FF5/D")
+        self.assertEqual([(label, d["extrapolated"]) for label, d in blocks], [("t_setup", [None, "below"])])
+        # ff2_default U2/Y: no extrapolation on either axis; the four corners bracket the query.
+        point, blocks = self.blocks("ff2_default", "ff2", "FF2/D", "setup", "U2/Y")
+        for label, d in blocks:
+            self.assertEqual(d["extrapolated"], [None, None], label)
+            for (lo, hi), q in zip(d["bracket"], d["query"]):
+                self.assertTrue(lo <= q <= hi)
+        point, blocks = self.blocks("ff2_default", "ff2", "FF2/D", "hold", "FF2/D")
+        self.assertEqual(fmt4(blocks[0][1]["value"]), fmt4(engine("ff2_default", "ff2").paths("FF2/D")["hold"]["capture"]["check"]))
+        self.assertEqual(self.blocks("ff2_default", "ff2", "FF2/D", "setup", "U2/B")[1], [])     # a net hop
+
+    def test_lookup_blocks_bundle(self):
+        # R34: a bundle has no tables, so no grid in bundle mode.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "b.json")
+            with open(path, "w") as f:
+                json.dump(bundle.debug_bundle(engine("ff2_default", "ff2").g, "FF2/D", depth=2), f)
+            b = BundleSource(path)
+        p = b.paths("FF2/D")["setup"]
+        self.assertEqual([model.lookups(p, b, k) for k in range(len(p["points"]))], [[]] * len(p["points"]))
+
+    def test_fanout(self):
+        # R34: net arcs leaving the pin; None for pins that drive no net (inputs, the capture pin).
+        src = engine("inv2", "inv2")
+        nets = [a for a in src.g.by_name["FF1/Q"].fanout if a.kind == "net"]
+        self.assertEqual(src.pin("FF1/Q")["fanout"], len(nets))
+        self.assertEqual((src.pin("U3/A")["fanout"], src.pin("y")["fanout"]), (None, None))
+        rows = model.path_table(src.paths("y")["setup"], src)[1]["rows"]
+        self.assertEqual([(r["label"], r["fanout"]) for r in rows],
+                         [("FF1/Q", len(nets)), ("U3/A", None), ("U3/Y", 1), ("y", None)])
+        s27 = engine("s27", "s27")
+        self.assertEqual((s27.pin("U14/Y")["fanout"], s27.pin("G0")["fanout"]), (2, 1))   # U8/A, U10/A
+
+    def test_near_critical(self):
+        # R33: 1 % of the clock period (was the constant 0.05).
+        self.assertEqual(fmt4(model.near_critical(engine("s27", "s27").period)), "0.1000")
+
 
 class ThemeTests(unittest.TestCase):
     def test_palettes(self):
@@ -385,6 +460,35 @@ class ThemeTests(unittest.TestCase):
     def test_fonts(self):
         self.assertEqual(theme.pick_font(("A", "B", "C"), {"B", "C"}), "B")
         self.assertEqual(theme.pick_font(("A", "B"), set()), "B")
+
+
+class SizingTests(unittest.TestCase):
+    """R32: the --scale value, the default scale and the window size, without Tk."""
+
+    def test_parse_scale(self):
+        self.assertEqual([sizing.parse_scale(t) for t in ("0.6", "1", "1.25", "2.0")], [0.6, 1.0, 1.25, 2.0])
+        for text in ("0.59", "2.01", "abc", "", "nan", "inf", "-1"):
+            with self.assertRaises(P2Error) as cm:
+                sizing.parse_scale(text)
+            self.assertEqual(str(cm.exception), "error: --scale needs a number from 0.6 to 2.0")
+
+    def test_default_scale(self):
+        self.assertEqual(sizing.default_scale("aqua", 1.3318), 1.0)
+        self.assertEqual(sizing.default_scale("x11", 96 / 72.0), 1.0)          # 96 dpi
+        self.assertEqual(sizing.default_scale("x11", 144 / 72.0), 1.5)
+        self.assertEqual((sizing.default_scale("x11", 4.0), sizing.default_scale("win32", 0.5)), (2.0, 0.6))
+
+    def test_geometry(self):
+        # The minimum is the three pane minimums and two dividers wide; header, status bar and
+        # the taller centre column (summary 90 + views 160 + table 80 + two dividers) high.
+        self.assertEqual(sizing.minimum(1.0), (280 + 460 + 320 + 6, 52 + 26 + 336))
+        # 1280x800 at scale 1: 92 % x 90 % of the screen, centred, and above the minimum.
+        self.assertEqual(sizing.geometry(1.0, 1280, 800), (1177, 720, 51, 40, 1066, 414))
+        self.assertEqual(sizing.geometry(1.0, 2560, 1440)[:2], (1520, 940))
+        self.assertEqual(sizing.geometry(1.0, 1440, 900)[:2], (1324, 810))
+        # A large scale on a small screen opens at the minimum, at the screen's left edge.
+        self.assertEqual(sizing.geometry(1.25, 1280, 800), (1333, 720, 0, 40, 1333, 517))
+        self.assertEqual(sizing.minimum(0.8), (852, 331))
 
 
 def run_viewer(*args):
@@ -410,12 +514,26 @@ class ViewerCliTests(unittest.TestCase):
         self.assertError(run_viewer("--lib", LIB, "--verilog", FF2_V, "--sdc", sdc("ff2_default"),
                                     "--theme", "neon"), "error: --theme needs one of light, dark, contrast")
 
+    def test_scale(self):
+        # R32: out of range or not a number, checked before the design is loaded.
+        for value in ("0.5", "2.1", "big"):
+            self.assertError(run_viewer("--lib", LIB, "--verilog", FF2_V, "--sdc", sdc("ff2_default"), "--scale", value),
+                             "error: --scale needs a number from 0.6 to 2.0")
+        self.assertError(run_viewer("--bundle", "missing.json", "--scale", "3"),
+                         "error: --scale needs a number from 0.6 to 2.0")
+
     def test_load_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             bad = os.path.join(tmp, "bad.json")
             with open(bad, "w") as f:
                 f.write("{not json")
             self.assertError(run_viewer("--bundle", bad), "error: %s is not JSON" % bad)
+            old = os.path.join(tmp, "old.json")         # R33: written before instances existed
+            b = bundle.debug_bundle(engine("ff2_default", "ff2").g, "FF2/D", depth=1)
+            del b["instances"]
+            with open(old, "w") as f:
+                json.dump(b, f)
+            self.assertError(run_viewer("--bundle", old), "error: bundle has no instances: write it again with --bundle")
             missing = os.path.join(tmp, "nope.lib")
             self.assertError(run_viewer("--lib", missing, "--verilog", FF2_V, "--sdc", sdc("ff2_default")),
                              "ERROR %s: cannot read file: No such file or directory" % missing)
@@ -467,9 +585,10 @@ class TkSmokeTests(unittest.TestCase):
             app.select_endpoint("FF5/D")
             self.assertIn("1.1373", self.texts(app.summary_cv))
             self.assertIn("9.8222", self.texts(app.summary_cv))       # required in the formula
-            for tab in ("schematic", "waveform", "profile"):
+            for tab in ("schematic", "waveform"):
                 app.set_tab(tab)
                 self.assertTrue(app.view.find_all(), tab)
+            self.assertEqual(app.root.bind("<Key-3>"), "")             # R33: 3 is reserved
             app.set_tab("schematic")
             app.expand("U9/A")
             app.set_check("hold")
@@ -481,8 +600,17 @@ class TkSmokeTests(unittest.TestCase):
             insp = self.texts(app.insp)
             self.assertIn("U9/Y", insp)
             self.assertTrue(any("U9/A" in t for t in insp))     # the losing input of the merge
+            self.assertIn("near-critical: margin < 0.1000", insp)  # R33: 1 % of the period
             app.select_cell("U9")
             self.assertTrue(any("NAND2" in t for t in self.texts(app.insp)))
+            app.select_endpoint("FF7/D")                          # R34: CK slew 0, below the grid
+            app.select_stage(1)
+            insp = self.texts(app.insp)
+            self.assertIn("extrapolated below", insp)
+            self.assertIn("input_net_transition", insp)
+            app.select_pin("FF7/Q")
+            self.assertIn("fanout", self.texts(app.insp))
+            self.assertIn("FANOUT", [t.replace(THIN, "") for t in self.texts(app.table)])
             app.filter_bin(0)
             app.filter_bin(0)
             app.set_zoom(1.5)
@@ -506,33 +634,91 @@ class TkSmokeTests(unittest.TestCase):
         self.assertTrue(any(e["name"] == "FF1" for e in app.layout["elements"]))
         self.assertEqual(app.errors, [])
 
-    def test_no_label_overlaps(self):
-        """Every endpoint, check, view and path stage, with every side input expanded once:
-        no two texts on one canvas overlap (1 px tolerance across, 2 px down)."""
-        app = self.App(self.root, engine("s27", "s27"), "light")
-        self.root.geometry("1520x940")
+    @unittest.skipUnless(all(os.path.exists(p) for p in S1423), "data/s1423.v or data/sdc/s1423.sdc not here")
+    def test_s1423_in_10_seconds(self):
+        """PROMPT_P5 section 6: open s1423 (about 1000 instances), the worst setup endpoint, both
+        views, three left / right steps, Hold, [ and ], within 10 s of wall clock."""
+        start = time.time()
+        src = EngineSource([LIB], S1423[0], S1423[1])
+        app = self.App(self.root, src, "light")
+        self.assertEqual(app.endpoint, model.EndpointList(src.rows()).view()[0]["pin"])
+        for tab in ("schematic", "waveform"):
+            app.set_tab(tab)
+        for delta in (-1, -1, 1):
+            app.step(delta)
+        app.set_check("hold")
+        app.toggle_panel("left")
+        app.toggle_panel("right")
         self.root.update()
-        canvases = (app.header, app.hist, app.plist, app.summary_cv, app.tabs, app.view, app.table, app.insp)
+        self.assertEqual(app.errors, [])
+        self.assertLess(time.time() - start, 10.0)
+
+    def test_scale(self):
+        # R32: pixels times s, fonts times s on aqua (s / default elsewhere), minimum from the panes.
+        app = self.App(self.root, engine("ff2_default", "ff2"), "light", 1.25)
+        self.assertEqual((app.px(10), app.ipx(3)), (12.5, 4))
+        aqua = self.root.tk.call("tk", "windowingsystem") == "aqua"
+        if aqua:
+            self.assertEqual(app.font("ui", 12).actual("size"), 15)
+        self.assertEqual(self.root.wm_minsize(), sizing.minimum(1.25))
+        self.assertEqual(int(app.body.panecget(app.insp, "minsize")), 400)
+        self.assertEqual(app.errors, [])
+
+    def test_no_label_overlaps(self):
+        """R32: every design, endpoint, check, view and path stage, with every side input
+        expanded once, at UI scales 0.8 / 1.0 / 1.25 and window widths 1100 / 1280 / 1520: no
+        two texts on one canvas overlap (1 px tolerance across, 2 px down) and none is cut off
+        (each lies inside its canvas, or inside the scroll region of a scrolling one)."""
+        for scale in (0.8, 1.0, 1.25):
+            for width in (1100, 1280, 1520):
+                for scenario, netlist in DESIGNS:
+                    self.check_texts(engine(scenario, netlist), scale, width, scenario)
+
+    def check_texts(self, src, scale, width, scenario):
+        app = self.App(self.root, src, "light", scale)
+        self.root.geometry("%dx940" % width)
+        self.root.deiconify()               # mapped, so every canvas has its real size
+        self.root.update()
+        self.assertEqual(self.root.winfo_width(), max(width, sizing.minimum(scale)[0]))
+        canvases = (app.header, app.hist, app.list_head, app.plist, app.summary_cv, app.tabs, app.view, app.table,
+                    app.insp, app.status)
         for row in app.endpoints.rows:
             for check in ("setup", "hold"):
                 app.select_endpoint(row["pin"])
                 app.set_check(check)
                 for stub in [s["pin"] for s in app.layout["stubs"] if s["state"] == "expand"] if app.layout else []:
                     app.expand(stub)
-                for tab in ("schematic", "waveform", "profile"):
+                for tab in ("waveform", "schematic"):
                     app.set_tab(tab)
-                    for k in range(len(app.path()["points"])) if app.path() else [None]:
-                        if k is not None:
-                            app.select_stage(k)
-                        for cv in canvases:
-                            boxes = [(cv.itemcget(i, "text"), cv.bbox(i)) for i in cv.find_all()
-                                     if cv.type(i) == "text" and cv.itemcget(i, "text").strip()]
-                            for n, (ta, a) in enumerate(boxes):
-                                for tb, b in boxes[n + 1:]:
-                                    self.assertFalse(a[0] + 1 < b[2] - 1 and b[0] + 1 < a[2] - 1 and
-                                                     a[1] + 2 < b[3] - 2 and b[1] + 2 < a[3] - 2,
-                                                     (row["pin"], check, tab, k, ta, tb))
+                    if tab == "waveform":
+                        self.root.update_idletasks()    # pane sizes settle (the summary grows to fit)
+                    for cv in canvases:
+                        self.check_canvas(cv, (scenario, scale, width, row["pin"], check, tab))
+                # A stage changes only the schematic, the table and the inspector (the same in
+                # both views), so the stages are stepped in the schematic.
+                for k in range(len(app.path()["points"])) if app.path() else []:
+                    app.select_stage(k)
+                    for cv in (app.view, app.table, app.insp):
+                        self.check_canvas(cv, (scenario, scale, width, row["pin"], check, k))
+        if app._static_job is not None:
+            self.root.after_cancel(app._static_job)
         self.assertEqual(app.errors, [])
+
+    def check_canvas(self, cv, where):
+        boxes = [(cv.itemcget(i, "text"), cv.bbox(i)) for i in cv.find_all()
+                 if cv.type(i) == "text" and cv.itemcget(i, "text").strip()]
+        for n, (ta, a) in enumerate(boxes):
+            for tb, b in boxes[n + 1:]:
+                self.assertFalse(a[0] + 1 < b[2] - 1 and b[0] + 1 < a[2] - 1 and
+                                 a[1] + 2 < b[3] - 2 and b[1] + 2 < a[3] - 2, where + (ta, tb))
+        region = cv.cget("scrollregion")
+        if region:
+            x0, y0, x1, y1 = [float(v) for v in region.split()]
+        else:
+            x0, y0, x1, y1 = 0, 0, cv.winfo_width(), cv.winfo_height()
+        for text, (a0, b0, a1, b1) in boxes:
+            self.assertTrue(x0 - 1 <= a0 and a1 <= x1 + 1 and y0 - 1 <= b0 and b1 <= y1 + 1,
+                            where + (str(cv), text, (a0, b0, a1, b1), (x0, y0, x1, y1)))
 
 
 if __name__ == "__main__":

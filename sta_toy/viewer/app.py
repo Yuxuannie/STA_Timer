@@ -1,29 +1,34 @@
 """Tk window (R29, viewer_p4.md v3): a timing-debug workstation for one design.
 
 Left: the endpoint slack histogram and the endpoint list (triage). Centre: for the selected
-endpoint and check, a summary card with the slack formula term by term, three views of the
-worst path (gate-level schematic, waveform with setup and hold windows, stage profile), and
+endpoint and check, a summary card with the slack formula term by term, two views of the
+worst path (gate-level schematic, waveform with setup and hold windows), and
 the path table in three sections. Right: an inspector for the selected pin — its AT / RAT /
 slew, the table lookup behind its delay, and which input set its arrival and which fanout
-set its required time. Everything is drawn on canvases so every theme colours it fully."""
+set its required time. Everything is drawn on canvases so every theme colours it fully.
+
+Scale (P5, R32): every pixel constant goes through px() (times the UI scale s) and every font
+through font(); model coordinates stay at scale 1 and the schematic is drawn at zoom * s."""
 
 import math
 import tkinter as tk
 import tkinter.font as tkfont
 
 from sta_toy.tsv import fmt4
-from sta_toy.viewer import model, theme
+from sta_toy.viewer import model, sizing, theme
+from sta_toy.viewer.sizing import MIN_CENTER, MIN_LEFT, MIN_RIGHT
 
-# Type scale (points): 9 tracked capitals for labels, 10-11 captions and dense rows, 12 body,
-# 13 the header mark, 16-18 titles, 28 the slack figure. Words in the UI font, every number in
-# the monospaced one; bold only for titles, totals and the current selection.
+# Type scale (points at scale 1): 9 tracked capitals for labels, 10-11 captions and dense rows,
+# 12 body, 13 the header mark, 16-18 titles, 28 the slack figure. Words in the UI font, every
+# number in the monospaced one; bold only for titles, totals and the current selection.
+# Pixel constants below are at scale 1.
 ROW = 26
-MIN_LEFT, MIN_CENTER, MIN_RIGHT = 280, 460, 320     # narrowest panes whose columns still fit
 THIN = "\u2009"
-TABS = ("schematic", "waveform", "profile")
+TABS = ("schematic", "waveform")
 TABLE = [("pin", 128, "w"), ("cell", 62, "w"), ("arc", 58, "w"), ("rf", 44, "w"), ("load", 66, "e"),
-         ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"), ("pin slack", 100, "e")]
-HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2/3 views   [ / ] hide panels   "
+         ("fanout", 66, "e"), ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"),
+         ("pin slack", 100, "e")]
+HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2 views   [ / ] hide panels   "
         "drag a divider to resize   click ⊕ to open the driving cell   ⌘-scroll zoom   F fit")
 
 
@@ -56,8 +61,11 @@ def _bezier(p0, p1, p2, n=12):
 
 
 class App:
-    def __init__(self, root, source, theme_name="light"):
+    def __init__(self, root, source, theme_name="light", scale=None):
         self.root, self.source = root, source
+        s0 = sizing.default_scale(root.tk.call("tk", "windowingsystem"), float(root.tk.call("tk", "scaling")))
+        self.s = s0 if scale is None else scale
+        self.font_scale = self.s / s0        # Tk already scales points by the display (tk scaling)
         self.endpoints = model.EndpointList(source.rows())
         self.check, self.endpoint, self.tab = "setup", None, "schematic"
         self.paths, self.path_cache = {"setup": None, "hold": None}, {}
@@ -65,7 +73,8 @@ class App:
         self.selected, self.stage, self.bin = None, None, None
         self.zoom, self.layout, self._fitted = 1.0, None, False
         self.errors, self.hits = [], {}
-        self.sizes = {"left": 300, "right": 320, "hist": 214, "summary": 168, "table": 300}
+        self.sizes = dict((k, self.ipx(v)) for k, v in (("left", 300), ("right", 320), ("hist", 214),
+                                                        ("summary", 168), ("table", 300)))
         self.show_left, self.show_right, self._static_job, self.body = True, True, None, None
         root.report_callback_exception = lambda *exc: self.errors.append(exc[1])
         families = set(tkfont.families(root))
@@ -77,8 +86,10 @@ class App:
         self.family = {"ui": ui, "mono": mono}
         self._font_cache = {}
         root.title("STA Timer — %s" % source.design_name)
-        root.geometry("1520x940")
-        root.minsize(1200, 760)
+        w, h, x, y, min_w, min_h = sizing.geometry(self.s, root.winfo_screenwidth(), root.winfo_screenheight())
+        self.min_width = min_w
+        root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        root.minsize(min_w, min_h)
         self.set_theme(theme_name)
         first = self.endpoints.neighbour(None, 0)
         if first:
@@ -87,8 +98,17 @@ class App:
 
     # ------------------------------------------------------------------ fonts and widgets
 
+    def px(self, v):
+        """v pixels at scale 1 in pixels at the UI scale."""
+        return v * self.s
+
+    def ipx(self, v):
+        """px(v) as a whole number for a widget option."""
+        return sizing.ipx(v, self.s)
+
     def font(self, kind="ui", size=12, bold=False):
-        key = (kind, int(round(size)), bold)
+        """`size` points at scale 1, at the UI scale."""
+        key = (kind, int(round(size * self.font_scale)), bold)
         if key not in self._font_cache:
             self._font_cache[key] = tkfont.Font(self.root, family=self.family[kind], size=max(6, key[1]),
                                                 weight="bold" if bold else "normal")
@@ -112,7 +132,7 @@ class App:
 
     def _paned(self, parent, orient):
         """A resizable split; its background is the colour of the draggable divider."""
-        return tk.PanedWindow(parent, orient=orient, sashwidth=3, sashrelief="flat", sashpad=0, bd=0,
+        return tk.PanedWindow(parent, orient=orient, sashwidth=self.ipx(sizing.SASH), sashrelief="flat", sashpad=0, bd=0,
                               bg=self.c["line"], opaqueresize=True, showhandle=False)
 
     def _remember_panes(self):
@@ -120,46 +140,46 @@ class App:
                                   ("hist", self.hist, "winfo_height"), ("summary", self.summary_cv, "winfo_height"),
                                   ("table", self.table, "winfo_height")):
             try:
-                if widget.winfo_ismapped() and getattr(widget, attr)() > 20:
+                if widget.winfo_ismapped() and getattr(widget, attr)() > self.px(20):
                     self.sizes[key] = getattr(widget, attr)()
             except tk.TclError:
                 pass
 
     def _build(self):
-        c, root = self.c, self.root
+        c, root, ipx = self.c, self.root, self.ipx
         root.configure(bg=c["panel"])
         root.grid_rowconfigure(1, weight=1)
         root.grid_columnconfigure(0, weight=1)
-        self.header = self._canvas(root, "panel", height=52)
+        self.header = self._canvas(root, "panel", height=ipx(sizing.HEADER))
         self.header.grid(row=0, column=0, sticky="ew")
         self.body = body = self._paned(root, "horizontal")
         body.grid(row=1, column=0, sticky="nsew")
 
         self.left_pane = left = self._paned(body, "vertical")
         self.hist = self._canvas(left, "panel")
-        left.add(self.hist, height=self.sizes["hist"], minsize=130, stretch="never")
+        left.add(self.hist, height=self.sizes["hist"], minsize=ipx(sizing.MIN_HIST), stretch="never")
         lst = tk.Frame(left, bg=c["panel"])
-        self.list_head = self._canvas(lst, "panel", height=30)
+        self.list_head = self._canvas(lst, "panel", height=ipx(30))
         self.list_head.pack(fill="x")
         box = tk.Frame(lst, bg=c["panel"])
-        box.pack(fill="x", padx=18, pady=(0, 4))
+        box.pack(fill="x", padx=ipx(18), pady=(0, ipx(4)))
         self.filter_var = tk.StringVar(value=self.endpoints.text)
         entry = tk.Entry(box, textvariable=self.filter_var, font=self.font("ui", 12), bg=c["raised"],
-                         fg=c["ink"], insertbackground=c["ink"], insertwidth=1, relief="flat",
-                         highlightthickness=1, highlightbackground=c["line"], highlightcolor=c["strong"])
-        entry.pack(fill="x", ipady=5, ipadx=4)
+                         fg=c["ink"], insertbackground=c["ink"], insertwidth=ipx(1), relief="flat",
+                         highlightthickness=ipx(1), highlightbackground=c["line"], highlightcolor=c["strong"])
+        entry.pack(fill="x", ipady=ipx(5), ipadx=ipx(4))
         self.filter_var.trace_add("write", lambda *a: self.set_filter(self.filter_var.get()))
         self.plist = self._canvas(lst, "panel")
         self.plist.pack(fill="both", expand=True)
         self._scrollable(self.plist)
-        left.add(lst, minsize=120, stretch="always")
-        body.add(left, width=self.sizes["left"], minsize=MIN_LEFT, stretch="never")
+        left.add(lst, minsize=ipx(sizing.MIN_LIST), stretch="always")
+        body.add(left, width=self.sizes["left"], minsize=ipx(MIN_LEFT), stretch="never")
 
         self.center = center = self._paned(body, "vertical")
         self.summary_cv = self._canvas(center, "bg")
-        center.add(self.summary_cv, height=self.sizes["summary"], minsize=90, stretch="never")
+        center.add(self.summary_cv, height=self.sizes["summary"], minsize=ipx(sizing.MIN_SUMMARY), stretch="never")
         views = tk.Frame(center, bg=c["bg"])
-        self.tabs = self._canvas(views, "bg", height=40)
+        self.tabs = self._canvas(views, "bg", height=ipx(40))
         self.tabs.pack(fill="x")
         self.view = self._canvas(views, "bg")
         self.view.pack(fill="both", expand=True)
@@ -167,18 +187,18 @@ class App:
         self.view.bind("<B1-Motion>", lambda e: self.tab == "schematic" and self.view.scan_dragto(e.x, e.y, gain=1))
         self.view.bind("<Configure>", lambda e: self._on_view_resize())
         self._scrollable(self.view, zoom=True)
-        center.add(views, minsize=160, stretch="always")
+        center.add(views, minsize=ipx(sizing.MIN_VIEWS), stretch="always")
         self.table = self._canvas(center, "bg")
-        center.add(self.table, height=self.sizes["table"], minsize=80, stretch="never")
+        center.add(self.table, height=self.sizes["table"], minsize=ipx(sizing.MIN_TABLE), stretch="never")
         self._scrollable(self.table)
-        body.add(center, minsize=MIN_CENTER, stretch="always")
+        body.add(center, minsize=ipx(MIN_CENTER), stretch="always")
 
         self.insp = self._canvas(body, "panel")
         self._scrollable(self.insp)
-        body.add(self.insp, width=self.sizes["right"], minsize=MIN_RIGHT, stretch="never")
+        body.add(self.insp, width=self.sizes["right"], minsize=ipx(MIN_RIGHT), stretch="never")
         body.paneconfigure(left, hide=not self.show_left)
         body.paneconfigure(self.insp, hide=not self.show_right)
-        self.status = self._canvas(root, "panel", height=26)
+        self.status = self._canvas(root, "panel", height=ipx(sizing.STATUS))
         self.status.grid(row=2, column=0, sticky="ew")
         for cv in (self.header, self.hist, self.list_head, self.plist, self.summary_cv, self.tabs, self.table,
                    self.insp, self.status):
@@ -242,7 +262,7 @@ class App:
                       ("<Up>", lambda: self.next_endpoint(-1)), ("<Down>", lambda: self.next_endpoint(1)),
                       ("<Key-s>", lambda: self.set_check("setup")), ("<Key-h>", lambda: self.set_check("hold")),
                       ("<Key-1>", lambda: self.set_tab("schematic")), ("<Key-2>", lambda: self.set_tab("waveform")),
-                      ("<Key-3>", lambda: self.set_tab("profile")), ("<Key-f>", self.fit),
+                      ("<Key-f>", self.fit),
                       ("<Key-bracketleft>", lambda: self.toggle_panel("left")),
                       ("<Key-bracketright>", lambda: self.toggle_panel("right"))):
             self.root.bind(k, key(fn))
@@ -343,7 +363,7 @@ class App:
             self._draw_view()
             return
         w, h = self.view.winfo_width(), self.view.winfo_height()
-        bw, bh = self.layout["bbox"][2], self.layout["bbox"][3]
+        bw, bh = self.layout["bbox"][2] * self.s, self.layout["bbox"][3] * self.s
         if w > 10 and h > 10:
             # Never below a readable size: long paths are panned (arrow keys follow the signal).
             self.zoom = max(0.95, min(1.25, w / float(bw), h / float(bh)))
@@ -366,9 +386,10 @@ class App:
                       key=lambda q: not q["on_path"])
         if not pins:
             return
-        bw, bh = self.layout["bbox"][2] * self.zoom, self.layout["bbox"][3] * self.zoom
+        z = self.zoom * self.s
+        bw, bh = self.layout["bbox"][2] * z, self.layout["bbox"][3] * z
         w, h = self.view.winfo_width(), self.view.winfo_height()
-        x, y = pins[0]["x"] * self.zoom, pins[0]["y"] * self.zoom
+        x, y = pins[0]["x"] * z, pins[0]["y"] * z
         if bw > w:
             self.view.xview_moveto(max(0.0, (x - w / 2.0) / bw))
         if bh > h:
@@ -438,57 +459,58 @@ class App:
         return self._text(cv, x, y, self._caps(text), "ui", 9, True, fill, anchor)
 
     def _width(self, parts):
-        return sum(self.font(k, s, b).measure(t) + g for t, k, s, b, _, g in parts) - parts[-1][5]
+        return sum(self.font(k, s, b).measure(t) + self.px(g) for t, k, s, b, _, g in parts) - self.px(parts[-1][5])
 
     def _run(self, cv, x, y, parts, anchor="w"):
         """Draw (text, kind, size, bold, colour, gap after) parts left to right on one baseline;
-        anchor "e" ends the run at x. Returns (x0, x1, items)."""
+        anchor "e" ends the run at x; gaps are pixels at scale 1. Returns (x0, x1, items)."""
         width = self._width(parts)
         x0 = x - width if anchor == "e" else x
         x, items = x0, []
         for text, kind, size, bold, colour, gap in parts:
             items.append(self._text(cv, x, y, text, kind, size, bold, colour))
-            x += self.font(kind, size, bold).measure(text) + gap
+            x += self.font(kind, size, bold).measure(text) + self.px(gap)
         return x0, x0 + width, items
 
     def _section(self, cv, y, title, w):
         """A hairline and a small-caps title; returns the y of the first row under it."""
-        cv.create_line(20, y, w - 20, y, fill=self.c["line"])
-        self._eyebrow(cv, 20, y + 20, title)
-        return y + 44
+        P = self.px
+        cv.create_line(P(20), y, w - P(20), y, fill=self.c["line"])
+        self._eyebrow(cv, P(20), y + P(20), title)
+        return y + P(44)
 
     # header ----------------------------------------------------------------------------
 
     def _draw_header(self):
-        cv, c = self.header, self.c
+        cv, c, P = self.header, self.c, self.px
         self._clear(cv)
-        w, y = max(cv.winfo_width(), 1200), 26
-        cv.create_line(0, 51, w, 51, fill=c["line"])
-        self._panel_icon(cv, 18, y, "left", self.show_left)
-        brand = self._text(cv, 52, y, "STA Timer", "ui", 13, True, "ink")
-        x = cv.bbox(brand)[2] + 16
-        cv.create_line(x, y - 9, x, y + 9, fill=c["strong"])
-        _, x, _ = self._run(cv, x + 16, y, [
+        w, y = max(cv.winfo_width(), self.min_width), P(26)
+        cv.create_line(0, self.ipx(sizing.HEADER) - 1, w, self.ipx(sizing.HEADER) - 1, fill=c["line"])
+        self._panel_icon(cv, P(18), y, "left", self.show_left)
+        brand = self._text(cv, P(52), y, "STA Timer", "ui", 13, True, "ink")
+        x = cv.bbox(brand)[2] + P(16)
+        cv.create_line(x, y - P(9), x, y + P(9), fill=c["strong"])
+        _, x, _ = self._run(cv, x + P(16), y, [
             (self.source.design_name, "ui", 12, False, "muted", 16),
             ("clock", "ui", 11, False, "faint", 5), (self.source.clock_name, "ui", 12, False, "muted", 16),
             ("period", "ui", 11, False, "faint", 5), ("%s ns" % fmt4(self.source.period), "mono", 11, False, "muted", 0)])
-        self._panel_icon(cv, w - 36, y, "right", self.show_right)
-        left = self._theme_switch(cv, w - 58, y)
-        limit = self._segmented(cv, left - 22, y, anchor="e") - 28
-        start = max(440, x + 48)
+        self._panel_icon(cv, w - P(36), y, "right", self.show_right)
+        left = self._theme_switch(cv, w - P(58), y)
+        limit = self._segmented(cv, left - P(22), y, anchor="e") - P(28)
+        start = max(P(440), x + P(48))
         groups = [(k, n, self.source.summary(k)) for k, n in (("setup", ("WNS", "TNS", "NVP")),
                                                                ("hold", ("WHS", "THS", "NVP")))]
         groups = [g for g in groups if g[2] is not None]
         for compact in (False, True):          # every figure if it fits, else only the worst slack
             runs = [self._metric_parts(k, n, s, compact) for k, n, s in groups]
-            if start + sum(self._width(p) + 36 for p in runs) - 36 <= limit or compact:
+            if start + sum(self._width(p) + P(36) for p in runs) - P(36) <= limit or compact:
                 break
         x = start
         for (check, _, _), parts in zip(groups, runs):
             x0, x1, _ = self._run(cv, x, y, parts)
-            hit = cv.create_rectangle(x0 - 6, y - 14, x1 + 6, y + 14, outline="", fill="")
+            hit = cv.create_rectangle(x0 - P(6), y - P(14), x1 + P(6), y + P(14), outline="", fill="")
             self._hit(cv, hit, lambda k=check: self.set_check(k))
-            x = x1 + 36
+            x = x1 + P(36)
 
     def _metric_parts(self, check, names, s, compact):
         parts = [(check.capitalize(), "ui", 12, False, "ink" if check == self.check else "muted", 12)]
@@ -503,42 +525,43 @@ class App:
     def _panel_icon(self, cv, x, y, side, on):
         """The sidebar glyph, a framed window whose left or right third is filled while that
         panel shows; x is its left edge."""
-        colour = self.c["muted"] if on else self.c["faint"]
-        _rounded(cv, x, y - 7, x + 18, y + 7, 3, fill="", outline=colour, width=1.2)
-        split = x + (6 if side == "left" else 12)
-        cv.create_line(split, y - 7, split, y + 7, fill=colour, width=1.2)
+        P, colour = self.px, self.c["muted"] if on else self.c["faint"]
+        _rounded(cv, x, y - P(7), x + P(18), y + P(7), P(3), fill="", outline=colour, width=P(1.2))
+        split = x + P(6 if side == "left" else 12)
+        cv.create_line(split, y - P(7), split, y + P(7), fill=colour, width=P(1.2))
         if on:
-            a, b = (x + 2, split - 1) if side == "left" else (split + 1, x + 16)
-            cv.create_rectangle(a, y - 5, b, y + 5, fill=colour, outline="")
-        hit = cv.create_rectangle(x - 8, y - 14, x + 26, y + 14, outline="", fill="")
+            a, b = (x + P(2), split - P(1)) if side == "left" else (split + P(1), x + P(16))
+            cv.create_rectangle(a, y - P(5), b, y + P(5), fill=colour, outline="")
+        hit = cv.create_rectangle(x - P(8), y - P(14), x + P(26), y + P(14), outline="", fill="")
         self._hit(cv, hit, lambda: self.toggle_panel(side))
 
     def _theme_switch(self, cv, x, y):
         """`◐ Light` ending at x; a click moves to the next theme. Returns its left edge."""
-        c = self.c
+        c, P = self.c, self.px
         nxt = theme.NAMES[(theme.NAMES.index(self.theme_name) + 1) % len(theme.NAMES)]
         x0, _, _ = self._run(cv, x, y, [(self.theme_name.capitalize(), "ui", 12, False, "muted", 0)], "e")
-        cx = x0 - 13
-        cv.create_oval(cx - 6, y - 6, cx + 6, y + 6, outline=c["muted"], width=1.2)
-        cv.create_arc(cx - 6, y - 6, cx + 6, y + 6, start=90, extent=180, fill=c["muted"], outline="")
-        hit = cv.create_rectangle(cx - 10, y - 14, x + 4, y + 14, outline="", fill="")
+        cx = x0 - P(13)
+        cv.create_oval(cx - P(6), y - P(6), cx + P(6), y + P(6), outline=c["muted"], width=P(1.2))
+        cv.create_arc(cx - P(6), y - P(6), cx + P(6), y + P(6), start=90, extent=180, fill=c["muted"], outline="")
+        hit = cv.create_rectangle(cx - P(10), y - P(14), x + P(4), y + P(14), outline="", fill="")
         self._hit(cv, hit, lambda: self.set_theme(nxt))
-        return cx - 8
+        return cx - P(8)
 
     def _segmented(self, cv, x, y, anchor="w"):
         """Setup | Hold: a recessed track with the active half raised; returns its left edge."""
-        c, w, h = self.c, 128, 26
+        P = self.px
+        c, w, h = self.c, P(128), P(26)
         x0 = x - w if anchor == "e" else x
-        _rounded(cv, x0, y - h / 2.0, x0 + w, y + h / 2.0, 7, fill=c["head"], outline="")
+        _rounded(cv, x0, y - h / 2.0, x0 + w, y + h / 2.0, P(7), fill=c["head"], outline="")
         for i, check in enumerate(("setup", "hold")):
             on = check == self.check
-            bx = x0 + 2 + i * (w - 4) / 2.0
+            bx = x0 + P(2) + i * (w - P(4)) / 2.0
             if on:
-                _rounded(cv, bx, y - h / 2.0 + 2, bx + (w - 4) / 2.0, y + h / 2.0 - 2, 5,
+                _rounded(cv, bx, y - h / 2.0 + P(2), bx + (w - P(4)) / 2.0, y + h / 2.0 - P(2), P(5),
                          fill=c["raised"], outline=c["strong"])
-            t = self._text(cv, bx + (w - 4) / 4.0, y, check.capitalize(), "ui", 11, on,
+            t = self._text(cv, bx + (w - P(4)) / 4.0, y, check.capitalize(), "ui", 11, on,
                            "ink" if on else "muted", "center")
-            hit = cv.create_rectangle(bx, y - h / 2.0, bx + (w - 4) / 2.0, y + h / 2.0, outline="", fill="")
+            hit = cv.create_rectangle(bx, y - h / 2.0, bx + (w - P(4)) / 2.0, y + h / 2.0, outline="", fill="")
             self._hit(cv, hit, lambda k=check: self.set_check(k))
             self._hit(cv, t, lambda k=check: self.set_check(k))
         return x0
@@ -557,19 +580,19 @@ class App:
         return rows
 
     def _draw_hist(self):
-        cv, c = self.hist, self.c
+        cv, c, P = self.hist, self.c, self.px
         self._clear(cv)
-        w = max(cv.winfo_width(), MIN_LEFT)
-        h = max(cv.winfo_height(), 130)
-        self._eyebrow(cv, 20, 26, "%s slack" % self.check)
+        w = max(cv.winfo_width(), P(MIN_LEFT))
+        h = max(cv.winfo_height(), P(sizing.MIN_HIST))
+        self._eyebrow(cv, P(20), P(26), "%s slack" % self.check)
         values = [r[self.check + "_slack"] for r in self.endpoints.rows]
         bins = model.histogram(values)
         if not bins:
             self._text(cv, w / 2.0, h / 2.0, "no %s checks" % self.check, "ui", 11, False, "faint", "center")
             return
         top = max(b["count"] for b in bins)
-        x0, x1, y0 = 20, w - 20, 60
-        y1 = max(y0 + 20, h - 66)        # from the bottom: caption, axis labels, then the bars
+        x0, x1, y0 = P(20), w - P(20), P(60)
+        y1 = max(y0 + P(20), h - P(66))  # from the bottom: caption, axis labels, then the bars
         bw = (x1 - x0) / float(len(bins))
         lo, hi = bins[0]["lo"], bins[-1]["hi"]
         for i, b in enumerate(bins):
@@ -580,70 +603,71 @@ class App:
                 colour = c["bad"] if b["hi"] <= 0 else c["ink"]
             else:
                 colour = c["strong"]
-            bar = cv.create_rectangle(x0 + i * bw + 2.5, y1 - max(bh, 2 if b["count"] else 0), x0 + (i + 1) * bw - 2.5,
-                                      y1, fill=colour if b["count"] else c["line"], outline="")
-            hit = cv.create_rectangle(x0 + i * bw, y0 - 8, x0 + (i + 1) * bw, y1 + 4, outline="", fill="")
+            bar = cv.create_rectangle(x0 + i * bw + P(2.5), y1 - max(bh, P(2) if b["count"] else 0),
+                                      x0 + (i + 1) * bw - P(2.5), y1, fill=colour if b["count"] else c["line"], outline="")
+            hit = cv.create_rectangle(x0 + i * bw, y0 - P(8), x0 + (i + 1) * bw, y1 + P(4), outline="", fill="")
             if b["count"]:
-                self._text(cv, x0 + (i + 0.5) * bw, y1 - bh - 8, str(b["count"]), "mono", 9, False, "faint", "center")
+                self._text(cv, x0 + (i + 0.5) * bw, y1 - bh - P(8), str(b["count"]), "mono", 9, False, "faint", "center")
             for item in (bar, hit):
                 self._hit(cv, item, lambda k=i: self.filter_bin(k))
         cv.create_line(x0, y1, x1, y1, fill=c["strong"])
-        self._text(cv, x0, y1 + 13, fmt4(lo), "mono", 9, False, "faint", "w")
-        self._text(cv, x1, y1 + 13, fmt4(hi), "mono", 9, False, "faint", "e")
+        self._text(cv, x0, y1 + P(13), fmt4(lo), "mono", 9, False, "faint", "w")
+        self._text(cv, x1, y1 + P(13), fmt4(hi), "mono", 9, False, "faint", "e")
         if lo < 0 < hi:
             zx = x0 + (0 - lo) / (hi - lo) * (x1 - x0)
-            cv.create_line(zx, y0 - 8, zx, y1 + 4, fill=c["muted"], dash=(2, 3))
-            if x0 + 40 < zx < x1 - 40:
-                self._text(cv, zx, y1 + 13, "0", "mono", 9, False, "muted", "center")
+            cv.create_line(zx, y0 - P(8), zx, y1 + P(4), fill=c["muted"], dash=(2, 3))
+            if x0 + P(40) < zx < x1 - P(40):
+                self._text(cv, zx, y1 + P(13), "0", "mono", 9, False, "muted", "center")
         defined = [v for v in values if v is not None]
         worst = min(defined)
         parts = [("worst", "ui", 10, False, "faint", 5), (fmt4(worst), "mono", 10, False, "bad" if _neg(worst) else "ok", 14),
                  ("%d endpoints" % len(defined), "ui", 10, False, "faint", 14)]
         if self.bin is not None:
             parts.append(("one bin shown", "ui", 10, False, "ink", 0))
-        self._run(cv, 20, h - 22, parts)
+        self._run(cv, P(20), h - P(22), parts)
 
     def _draw_list(self):
-        cv, c = self.plist, self.c
+        cv, c, P = self.plist, self.c, self.px
         self._clear(cv)
         self._clear(self.list_head)
-        w = max(cv.winfo_width(), MIN_LEFT)
+        w = max(cv.winfo_width(), P(MIN_LEFT))
         key = self.check + "_slack"
         rows = self._list_rows()
-        self._eyebrow(self.list_head, 20, 16, "endpoints")
-        self._text(self.list_head, w - 20, 16, "%d / %d" % (len(rows), len(self.endpoints.rows)), "mono", 9, False,
+        self._eyebrow(self.list_head, P(20), P(16), "endpoints")
+        self._text(self.list_head, w - P(20), P(16), "%d / %d" % (len(rows), len(self.endpoints.rows)), "mono", 9, False,
                    "faint", "e")
-        cols = ((20, "w"), (154, "e"), (176, "w"), (w - 20, "e"))
+        cols = ((P(20), "w"), (P(154), "e"), (P(176), "w"), (w - P(20), "e"))
         for (x, anchor), title in zip(cols, ("endpoint", "slack", "from", "levels")):
-            self._text(cv, x, 16, title, "ui", 10, False, "faint", anchor)
-        y = 30
+            self._text(cv, x, P(16), title, "ui", 10, False, "faint", anchor)
+        y = P(30)
         for r in rows:
             on = r["pin"] == self.endpoint
             if on:
-                _rounded(cv, 8, y, w - 8, y + 34, 6, fill=c["select"], outline="")
+                _rounded(cv, P(8), y, w - P(8), y + P(34), P(6), fill=c["select"], outline="")
             p = self._paths_of(r["pin"]).get(self.check)
             v = r[key]
-            self._text(cv, 20, y + 17, r["pin"], "ui", 12, on, "ink")
-            self._text(cv, 154, y + 17, _num(v), "mono", 11, False, "faint" if v is None else ("bad" if _neg(v) else "ok"),
+            self._text(cv, P(20), y + P(17), r["pin"], "ui", 12, on, "ink")
+            self._text(cv, P(154), y + P(17), _num(v), "mono", 11, False,
+                       "faint" if v is None else ("bad" if _neg(v) else "ok"), "e")
+            self._text(cv, P(176), y + P(17), p["start"] if p else "—", "ui", 11, False, "muted")
+            self._text(cv, w - P(20), y + P(17), str(model.summary(p)["levels"]) if p else "", "mono", 11, False, "faint",
                        "e")
-            self._text(cv, 176, y + 17, p["start"] if p else "—", "ui", 11, False, "muted")
-            self._text(cv, w - 20, y + 17, str(model.summary(p)["levels"]) if p else "", "mono", 11, False, "faint", "e")
-            hit = cv.create_rectangle(0, y, w, y + 34, outline="", fill="")
+            hit = cv.create_rectangle(0, y, w, y + P(34), outline="", fill="")
             self._hit(cv, hit, lambda k=r["pin"]: self.select_endpoint(k))
-            y += 36
-        cv.configure(scrollregion=(0, 0, w, y + 10))
+            y += P(36)
+        cv.configure(scrollregion=(0, 0, w, y + P(10)))
 
     # centre: summary, tabs ---------------------------------------------------------------
 
     def _draw_summary(self):
         """The endpoint, its slack, and the slack worked out term by term like a receipt."""
-        cv, c = self.summary_cv, self.c
+        cv, c, P = self.summary_cv, self.c, self.px
         self._clear(cv)
-        w = max(cv.winfo_width(), MIN_CENTER)
+        w = max(cv.winfo_width(), P(MIN_CENTER))
         path = self.path()
-        self._text(cv, 24, 32, self.endpoint or "", "ui", 18, True, "ink")
+        self._text(cv, P(24), P(32), self.endpoint or "", "ui", 18, True, "ink")
         if not path:
-            self._text(cv, 24, 58, "No %s path ends here (the check is not constrained)." % self.check,
+            self._text(cv, P(24), P(58), "No %s path ends here (the check is not constrained)." % self.check,
                        "ui", 12, False, "muted")
             return
         s = model.summary(path)
@@ -653,33 +677,33 @@ class App:
         sub = ["%s path from %s" % (self.check, s["start"]), "%d logic levels" % s["levels"]]
         if s["skew"] is not None:
             sub.append("clock skew %s" % fmt4(s["skew"]))
-        hero = self._text(cv, w - 24, 34, fmt4(s["slack"]), "ui", 28, False, status, "e")
-        x0, _, _ = self._run(cv, w - 24, 62, [(self._caps("%s slack" % self.check), "ui", 9, True, "faint", 8),
+        hero = self._text(cv, w - P(24), P(34), fmt4(s["slack"]), "ui", 28, False, status, "e")
+        x0, _, _ = self._run(cv, w - P(24), P(62), [(self._caps("%s slack" % self.check), "ui", 9, True, "faint", 8),
                                               (self._caps("violated" if bad else "met"), "ui", 9, True, status, 0)], "e")
-        limit, lines = min(x0, cv.bbox(hero)[0]) - 20 - 24, [sub[0]]
+        limit, lines = min(x0, cv.bbox(hero)[0]) - P(20) - P(24), [sub[0]]
         for part in sub[1:]:             # wrap before the slack figure
             if self.font("ui", 11).measure(lines[-1] + "   ·   " + part) <= limit:
                 lines[-1] += "   ·   " + part
             else:
                 lines.append(part)
         for i, line in enumerate(lines[:2]):
-            self._text(cv, 24, 57 + 17 * i, line, "ui", 11, False, "muted")
-        right = min(w - 24, 940)         # totals end here; the "=" column sits before them
-        eq = right - 104
-        y = 96 if len(lines) == 1 else 106
+            self._text(cv, P(24), P(57 + 17 * i), line, "ui", 11, False, "muted")
+        right = min(w - P(24), P(940))   # totals end here; the "=" column sits before them
+        eq = right - P(104)
+        y = P(96 if len(lines) == 1 else 106)
         for label, terms, total in (("arrival", f["arrival"], s["arrival"]), ("required", f["required"], s["required"])):
-            self._text(cv, 24, y, label, "ui", 11, False, "faint")
-            y = self._terms(cv, 104, y, [t for t in terms if t[1] is not None], eq - 18)
+            self._text(cv, P(24), y, label, "ui", 11, False, "faint")
+            y = self._terms(cv, P(104), y, [t for t in terms if t[1] is not None], eq - P(18))
             self._text(cv, eq, y, "=", "mono", 11, False, "faint", "center")
             self._text(cv, right, y, fmt4(total), "mono", 12, True, "ink", "e")
-            y += 24
-        cv.create_line(104, y - 11, right, y - 11, fill=c["strong"])
-        self._text(cv, 24, y + 2, "slack", "ui", 11, False, "faint")
-        self._text(cv, 104, y + 2, "required − arrival" if self.check == "setup" else "arrival − required",
+            y += P(24)
+        cv.create_line(P(104), y - P(11), right, y - P(11), fill=c["strong"])
+        self._text(cv, P(24), y + P(2), "slack", "ui", 11, False, "faint")
+        self._text(cv, P(104), y + P(2), "required − arrival" if self.check == "setup" else "arrival − required",
                    "ui", 11, False, "muted")
-        self._text(cv, eq, y + 2, "=", "mono", 11, False, "faint", "center")
-        self._text(cv, right, y + 2, fmt4(s["slack"]), "mono", 12, True, status, "e")
-        need = int(y + 24)               # never cut the receipt: the strip grows to hold it
+        self._text(cv, eq, y + P(2), "=", "mono", 11, False, "faint", "center")
+        self._text(cv, right, y + P(2), fmt4(s["slack"]), "mono", 12, True, status, "e")
+        need = int(y + P(24))            # never cut the receipt: the strip grows to hold it
         if int(self.center.panecget(cv, "minsize")) != need:
             self.center.paneconfigure(cv, minsize=need)
         if cv.winfo_height() < need:
@@ -696,45 +720,47 @@ class App:
                 value = abs(value)
             parts += [(name, "ui", 11, False, "muted", 5), (fmt4(value), "mono", 11, False, "ink", 0)]
             if i and x + self._width(parts) > limit:
-                x, y = start + 14, y + 18
-            x = self._run(cv, x, y, parts)[1] + 10
+                x, y = start + self.px(14), y + self.px(18)
+            x = self._run(cv, x, y, parts)[1] + self.px(10)
         return y
 
     def _draw_tabs(self):
-        cv, c = self.tabs, self.c
+        cv, c, P = self.tabs, self.c, self.px
         self._clear(cv)
-        w = max(cv.winfo_width(), MIN_CENTER)
-        cv.create_line(0, 39, w, 39, fill=c["line"])
-        x = 24
+        w = max(cv.winfo_width(), P(MIN_CENTER))
+        base = self.ipx(40) - 1
+        cv.create_line(0, base, w, base, fill=c["line"])
+        x = P(24)
         for tab in TABS:
             on = tab == self.tab
-            t = self._text(cv, x, 20, tab.capitalize(), "ui", 12, on, "ink" if on else "muted")
+            t = self._text(cv, x, P(20), tab.capitalize(), "ui", 12, on, "ink" if on else "muted")
             x0, y0, x1, y1 = cv.bbox(t)
             if on:
-                cv.create_rectangle(x0, 37, x1, 39, fill=c["ink"], outline="")
-            hit = cv.create_rectangle(x0 - 8, 4, x1 + 8, 38, outline="", fill="")
+                cv.create_rectangle(x0, base - P(2), x1, base, fill=c["ink"], outline="")
+            hit = cv.create_rectangle(x0 - P(8), P(4), x1 + P(8), base - P(1), outline="", fill="")
             self._hit(cv, hit, lambda k=tab: self.set_tab(k))
-            x = x1 + 26
+            x = x1 + P(26)
         tabs_end = x
         if self.tab != "schematic":
             return
         controls = [("Collapse", self.collapse), ("Fit", self.fit), ("+", lambda: self.set_zoom(self.zoom * 1.2)),
                     ("%d%%" % round(self.zoom * 100), None), ("−", lambda: self.set_zoom(self.zoom / 1.2))]
-        width = lambda: sum(self.font("ui" if fn else "mono", 12 if fn else 10).measure(label) + 20 for label, fn in controls)
+        width = lambda: sum(self.font("ui" if fn else "mono", 12 if fn else 10).measure(label) + P(20)
+                            for label, fn in controls)
         for optional in (3, 1):          # when narrow, drop the zoom readout, then Fit (the F key stays)
-            if w - 24 - width() < tabs_end:
+            if w - P(24) - width() < tabs_end:
                 del controls[optional]
-        x = w - 24
+        x = w - P(24)
         for label, fn in controls:
-            t = self._text(cv, x, 20, label, "ui" if fn else "mono", 12 if fn else 10, False,
+            t = self._text(cv, x, P(20), label, "ui" if fn else "mono", 12 if fn else 10, False,
                            "muted" if fn else "faint", "e")
             x0, y0, x1, y1 = cv.bbox(t)
             if fn:
-                hit = cv.create_rectangle(x0 - 6, 6, x1 + 6, 34, outline="", fill="")
+                hit = cv.create_rectangle(x0 - P(6), P(6), x1 + P(6), P(34), outline="", fill="")
                 self._hit(cv, hit, fn)
-            x = x0 - (20 if label in ("Collapse", "Fit") else 10)
-        if self.expanded and x - 10 - self.font("ui", 10).measure("9 opened") > tabs_end + 20:
-            self._text(cv, x - 10, 20, "%d opened" % len(self.expanded), "ui", 10, False, "faint", "e")
+            x = x0 - P(20 if label in ("Collapse", "Fit") else 10)
+        if self.expanded and x - P(10) - self.font("ui", 10).measure("9 opened") > tabs_end + P(20):
+            self._text(cv, x - P(10), P(20), "%d opened" % len(self.expanded), "ui", 10, False, "faint", "e")
 
     # centre: views -------------------------------------------------------------------------
 
@@ -742,7 +768,7 @@ class App:
         cv = self.view
         self._clear(cv)
         if not self.path():
-            self._text(cv, 30, 30, "No %s path for %s." % (self.check, self.endpoint), "ui", 12, False, "muted")
+            self._text(cv, self.px(30), self.px(30), "No %s path for %s." % (self.check, self.endpoint), "ui", 12, False, "muted")
             cv.configure(scrollregion=(0, 0, cv.winfo_width(), cv.winfo_height()))
             return
         getattr(self, "_draw_" + self.tab)()
@@ -750,8 +776,8 @@ class App:
     def _draw_schematic(self):
         """Neutral line art; only the critical path (wires, leads, pins, AT labels) in the accent."""
         cv, c, z, lay = self.view, self.c, self.zoom, self.layout
-        S = lambda v: v * z
-        w, h = max(cv.winfo_width(), 200), max(cv.winfo_height(), 200)
+        S = lambda v: v * z * self.s     # model pixels at zoom 1 and scale 1
+        w, h = max(cv.winfo_width(), self.px(200)), max(cv.winfo_height(), self.px(200))
         bw, bh = S(lay["bbox"][2]), S(lay["bbox"][3])
         ox = -(w - bw) / 2.0 if bw < w else 0       # centre a drawing smaller than the view
         oy = -(h - bh) / 2.0 if bh < h else 0
@@ -910,7 +936,7 @@ class App:
         self._hit(cv, t, lambda k=st["pin"]: self.select_pin(k))
 
     def _time_axis(self, cv, t0, t1, x0, x1, y, ticks=8):
-        c = self.c
+        c, P = self.c, self.px
         cv.create_line(x0, y, x1, y, fill=c["strong"])
         step = (t1 - t0) / float(ticks)
         mag = 10 ** math.floor(math.log10(step)) if step > 0 else 1
@@ -918,274 +944,251 @@ class App:
         t = math.ceil(t0 / step) * step
         X = lambda v: x0 + (v - t0) / (t1 - t0) * (x1 - x0)
         while t <= t1 + 1e-9:
-            cv.create_line(X(t), y, X(t), y + 4, fill=c["strong"])
-            self._text(cv, X(t), y + 14, ("%g" % round(t, 6)), "mono", 9, False, "faint", "center")
+            cv.create_line(X(t), y, X(t), y + P(4), fill=c["strong"])
+            self._text(cv, X(t), y + P(14), ("%g" % round(t, 6)), "mono", 9, False, "faint", "center")
             t += step
         return X
 
     def _draw_waveform(self):
         """Walkthrough §6: both clocks, the data at the endpoint between its earliest and latest
         arrival, the hold and setup windows, and both slacks, each in its own lane."""
-        cv, c = self.view, self.c
-        w = max(cv.winfo_width(), 700)
-        wave = model.waveform(self.paths.get("setup"), self.paths.get("hold"), self.source.period, self.check)
-        t0, t1 = wave["span"]
-        x0, x1 = 236, w - 40
+        cv, c, P = self.view, self.c, self.px
+        w = max(cv.winfo_width(), P(700))
+        args = (self.paths.get("setup"), self.paths.get("hold"), self.source.period, self.check)
+        t0, t1 = model.waveform(*args)["span"]
+        label_w = lambda text: self.font("mono", 9).measure(text) + P(6)
+        x0, x1 = P(236), w - max(P(40), label_w(fmt4(t1)) + P(4))     # the last edge label still fits
+        wave = model.waveform(*args, text_width=label_w, axis_px=x1 - x0)
         X = lambda v: x0 + (v - t0) / (t1 - t0) * (x1 - x0)
-        self._eyebrow(cv, 24, 18, "timing diagram · setup and hold of %s" % self.endpoint)
-        lanes = {"launch": 64, "capture": 120, "data": 180}
+        self._eyebrow(cv, P(24), P(18), "timing diagram · setup and hold of %s" % self.endpoint)
+        lanes = {"launch": P(64), "capture": P(120), "data": P(180)}
         clocks = [r for r in wave["rows"] if r["kind"] == "clock"]
         data = [r for r in wave["rows"] if r["kind"] == "data"][0]
         arrows = sorted(wave["marks"], key=lambda m: m["kind"] != "hold")
-        arrow_y = dict((m["kind"], 238 + 34 * i) for i, m in enumerate(arrows))
-        axis_y = 238 + 34 * len(arrows) + 14
-        cv.configure(scrollregion=(0, 0, w, max(axis_y + 40, cv.winfo_height())))
-        top, bottom = lanes["capture"] - 18, lanes["data"] + 10
+        arrow_y = dict((m["kind"], P(238 + 46 * i)) for i, m in enumerate(arrows))
+        axis_y = P(238 + 46 * len(arrows) + 2)
+        cv.configure(scrollregion=(0, 0, w, max(axis_y + P(40), cv.winfo_height())))
+        top, bottom = lanes["capture"] - P(18), lanes["data"] + P(10)
         for m in wave["marks"]:          # windows first, under everything
             wa, wb = X(min(m["window"])), X(max(m["window"]))
-            cv.create_rectangle(wa, top, max(wb, wa + 2), bottom, fill=c[m["kind"] + "_soft"], outline="")
-            cv.create_line(X(m["required"]), top, X(m["required"]), arrow_y[m["kind"]] + 6, fill=c[m["kind"]],
-                           dash=(4, 3), width=1.2)
+            cv.create_rectangle(wa, top, max(wb, wa + P(2)), bottom, fill=c[m["kind"] + "_soft"], outline="")
+            cv.create_line(X(m["required"]), top, X(m["required"]), arrow_y[m["kind"]] + P(6), fill=c[m["kind"]],
+                           dash=(4, 3), width=P(1.2))
         for row, lane in zip(clocks, (lanes["launch"], lanes["capture"])):
-            self._text(cv, 24, lane - 6, row["name"], "ui", 12, False, "ink")
-            self._text(cv, 24, lane + 10, row["pin"] or "", "ui", 10, False, "faint")
-            hi, lo = lane - 14, lane + 6
+            self._text(cv, P(24), lane - P(6), row["name"], "ui", 12, False, "ink")
+            self._text(cv, P(24), lane + P(10), row["pin"] or "", "ui", 10, False, "faint")
+            hi, lo = lane - P(14), lane + P(6)
             period = row["period"]
             t = row["edges"][0] - period * math.ceil((row["edges"][0] - t0) / period)
-            pts, last_label = [(x0, lo)], -1e9
+            pts = [(x0, lo)]
             while t < t1:
                 for a, level in ((t, hi), (t + period / 2.0, lo)):
                     if t0 <= a <= t1:
                         pts += [(X(a), pts[-1][1]), (X(a), level)]
-                if t0 <= t <= t1 and X(t) - last_label > 60:
-                    self._text(cv, X(t) + 3, lo + 11, fmt4(t), "mono", 9, False, "faint")
-                    last_label = X(t)
                 t += period
+            for t, text, anchor in row["labels"]:
+                self._text(cv, X(t) + P(3 if anchor == "w" else -3), lo + P(11), text, "mono", 9, False, "faint", anchor)
             pts.append((x1, pts[-1][1]))
-            cv.create_line(*[v for xy in pts for v in xy], fill=c["muted"], width=1.4)
+            cv.create_line(*[v for xy in pts for v in xy], fill=c["muted"], width=P(1.4))
         lane = lanes["data"]
-        self._text(cv, 24, lane - 6, data["name"], "ui", 12, False, "ink")
-        self._text(cv, 24, lane + 10, "old → new data", "ui", 10, False, "faint")
+        self._text(cv, P(24), lane - P(6), data["name"], "ui", 12, False, "ink")
+        self._text(cv, P(24), lane + P(10), "old → new data", "ui", 10, False, "faint")
         early, late = data["early"], data["late"]
         a = X(early) if early is not None else X(late)
         b = X(late) if late is not None else X(early)
-        hi, lo = lane - 12, lane + 8
+        hi, lo = lane - P(12), lane + P(8)
         for xa, xb, label in ((x0, a, "old data"), (b, x1, "new data")):
             if xb > xa:
-                cv.create_line(xa, hi, xb, hi, fill=c["ink"], width=1.3)
-                cv.create_line(xa, lo, xb, lo, fill=c["ink"], width=1.3)
-                if xb - xa > 80:
-                    self._text(cv, (xa + xb) / 2.0, lane - 2, label, "ui", 10, False, "faint", "center")
+                cv.create_line(xa, hi, xb, hi, fill=c["ink"], width=P(1.3))
+                cv.create_line(xa, lo, xb, lo, fill=c["ink"], width=P(1.3))
+                if xb - xa > P(80):
+                    self._text(cv, (xa + xb) / 2.0, lane - P(2), label, "ui", 10, False, "faint", "center")
         if b > a:
             cv.create_rectangle(a, hi, b, lo, fill=c["head"], outline="")
             xs = a
             while xs < b:
-                cv.create_line(xs, lo, min(b, xs + 10), hi, fill=c["strong"], width=1)
-                xs += 7
-            if b - a > 130:
-                t = self._text(cv, (a + b) / 2.0, lane - 2, "changing", "ui", 10, False, "muted", "center")
+                cv.create_line(xs, lo, min(b, xs + P(10)), hi, fill=c["strong"])
+                xs += P(7)
+            if b - a > P(130):
+                t = self._text(cv, (a + b) / 2.0, lane - P(2), "changing", "ui", 10, False, "muted", "center")
                 x0_, y0_, x1_, y1_ = cv.bbox(t)
-                cv.tag_lower(cv.create_rectangle(x0_ - 4, y0_, x1_ + 4, y1_, fill=c["head"], outline=""), t)
+                cv.tag_lower(cv.create_rectangle(x0_ - P(4), y0_, x1_ + P(4), y1_, fill=c["head"], outline=""), t)
         for x in (a, b):
-            cv.create_line(x, hi, x, lo, fill=c["ink"], width=1.3)
+            cv.create_line(x, hi, x, lo, fill=c["ink"], width=P(1.3))
         for x, value, word, kind, side in ((a, early, "earliest", "hold", "ne"), (b, late, "latest", "setup", "nw")):
             if value is None:
                 continue
             label = "%s %s" % (word, fmt4(value))
             half = self.font("mono", 9).measure(label) / 2.0
-            anchor = side if b - a < 160 else "n"           # apart when the edges are close
-            if x + half * (2 if anchor == "nw" else 1) > w - 8:
+            anchor = side if b - a < P(160) else "n"        # apart when the edges are close
+            if x + half * (2 if anchor == "nw" else 1) > w - P(8):
                 anchor = "ne"
-            self._text(cv, x, lo + 11, label, "mono", 9, False, kind, anchor)
+            self._text(cv, x, lo + P(11), label, "mono", 9, False, kind, anchor)
         for m in arrows:
             y = arrow_y[m["kind"]]
             colour = "bad" if _neg(m["slack"]) else m["kind"]
             ra, ar = X(m["required"]), X(m["arrival"])
-            cv.create_line(min(ra, ar), y, max(ra, ar), y, fill=c[colour], width=1.6, arrow="both", arrowshape=(7, 8, 3))
+            cv.create_line(min(ra, ar), y, max(ra, ar), y, fill=c[colour], width=P(1.6), arrow="both",
+                           arrowshape=(P(7), P(8), P(3)))
             label = "%s slack %s" % (m["kind"], fmt4(m["slack"]))
-            self._text(cv, 24, y, "%s check" % m["kind"], "ui", 12, False, "ink")
-            if abs(ra - ar) > 150:
-                self._text(cv, (ra + ar) / 2.0, y - 10, label, "mono", 10, True, colour, "center")
-            elif max(ra, ar) + 10 + self.font("mono", 10, True).measure(label) < w - 8:
-                self._text(cv, max(ra, ar) + 10, y, label, "mono", 10, True, colour, "w")
+            self._text(cv, P(24), y, "%s check" % m["kind"], "ui", 12, False, "ink")
+            if abs(ra - ar) > P(150):
+                self._text(cv, (ra + ar) / 2.0, y - P(10), label, "mono", 10, True, colour, "center")
+            elif max(ra, ar) + P(10) + self.font("mono", 10, True).measure(label) < w - P(8):
+                self._text(cv, max(ra, ar) + P(10), y, label, "mono", 10, True, colour, "w")
             else:
-                self._text(cv, min(ra, ar) - 10, y, label, "mono", 10, True, colour, "e")
-            self._text(cv, ra, y + 12, "req %s" % fmt4(m["required"]), "mono", 9, False, m["kind"],
-                       "ne" if ra < ar or ra > x1 - 100 else "nw")
+                self._text(cv, min(ra, ar) - P(10), y, label, "mono", 10, True, colour, "e")
+            self._text(cv, ra, y + P(12), "req %s" % fmt4(m["required"]), "mono", 9, False, m["kind"],
+                       "ne" if ra < ar or ra > x1 - P(100) else "nw")
         self._time_axis(cv, t0, t1, x0, x1, axis_y)
-        self._text(cv, 24, axis_y + 6, "time (ns)", "ui", 10, False, "faint")
-
-    def _draw_profile(self):
-        cv, c = self.view, self.c
-        path = self.path()
-        w = max(cv.winfo_width(), 700)
-        bars = model.profile(path)
-        rows = len(bars)
-        cv.configure(scrollregion=(0, 0, w, max(rows * 30 + 120, cv.winfo_height())))
-        t1 = max(path["required"], path["arrival"], max(b["t1"] for b in bars))
-        t0 = min(0.0, path["required"])
-        x0, x1 = 230, w - 140
-        X = lambda v: x0 + (v - t0) / (t1 - t0) * (x1 - x0)
-        self._eyebrow(cv, 24, 18, "stage profile · where the %s path spends its time" % self.check)
-        big = max(b["delay"] for b in bars[1:]) if len(bars) > 1 else 0
-        y = 42
-        for b in bars:
-            on = self.stage == b["index"]
-            if on:
-                _rounded(cv, 12, y - 2, w - 12, y + 24, 5, fill=c["select"], outline="")
-            self._text(cv, 24, y + 11, b["label"], "ui", 12, on, "ink" if b["kind"] != "launch" else "muted")
-            colour = c["line"] if b["kind"] == "launch" else (c["accent"] if b["delay"] == big else c["wire"])
-            bar = cv.create_rectangle(X(b["t0"]), y + 5, max(X(b["t1"]), X(b["t0"]) + 2), y + 17, fill=colour, outline="")
-            self._text(cv, max(X(b["t1"]), X(b["t0"]) + 2) + 8, y + 11, "+" + fmt4(b["delay"]), "mono", 10, False,
-                       "accent_ink" if b["delay"] == big else "muted")
-            hit = cv.create_rectangle(0, y - 2, w, y + 24, outline="", fill="")
-            for it in (bar, hit):
-                self._hit(cv, it, lambda k=b["index"]: self.select_stage(k))
-            y += 28
-        first = "arrival" if path["arrival"] <= path["required"] else "required"
-        for label, value, colour in (("arrival", path["arrival"], "ink"), ("required", path["required"], "muted")):
-            left = label == first               # the left line's label goes left, the other's right
-            cv.create_line(X(value), 34, X(value), y + 4, fill=c[colour], dash=(4, 3), width=1.2)
-            self._text(cv, X(value) + (-4 if left else 4), y + 14, "%s %s" % (label, fmt4(value)), "mono", 9, False,
-                       colour, "e" if left else "w")
-        self._time_axis(cv, t0, t1, x0, x1, y + 34)
+        self._text(cv, P(24), axis_y + P(6), "time (ns)", "ui", 10, False, "faint")
 
     # centre: path table ---------------------------------------------------------------
 
     def _draw_table(self):
         """Three sections, no row rules: whitespace and one strong rule above the slack."""
-        cv, c = self.table, self.c
+        cv, c, P = self.table, self.c, self.px
         self._clear(cv)
-        w = max(cv.winfo_width(), 700)
+        w = max(cv.winfo_width(), P(700))
         path = self.path()
         if not path:
             return
-        xs, x = [], 24
+        xs, x, row_h = [], P(24), P(ROW)
         for title, width, anchor in TABLE:
-            xs.append((x, width, anchor))
-            self._text(cv, x + (width - 6 if anchor == "e" else 0), 20, self._caps(title), "ui", 9, True, "faint", anchor)
-            x += width
+            xs.append((x, P(width), anchor))
+            self._text(cv, x + (P(width - 6) if anchor == "e" else 0), P(20), self._caps(title), "ui", 9, True, "faint",
+                       anchor)
+            x += P(width)
         right = x
-        cv.create_line(24, 34, max(w - 24, right), 34, fill=c["line"])
-        num = lambda k: xs[k][0] + xs[k][1] - 6          # right edge of a number column
-        y = 42
+        cv.create_line(P(24), P(34), max(w - P(24), right), P(34), fill=c["line"])
+        num = lambda k: xs[k][0] + xs[k][1] - P(6)       # right edge of a number column
+        y = P(42)
         for sec in model.path_table(path, self.source):
-            self._eyebrow(cv, 24, y + 12, sec["title"])
+            self._eyebrow(cv, P(24), y + P(12), sec["title"])
             rows = sec["rows"]
             if sec["title"] == "Data path" and rows:
-                self._text(cv, num(7), y + 12, "Σ " + fmt4(model.summary(path)["data_path"]), "mono", 10, False,
+                self._text(cv, num(8), y + P(12), "Σ " + fmt4(model.summary(path)["data_path"]), "mono", 10, False,
                            "faint", "e")
-            y += 26
+            y += P(26)
             for r in rows:
                 idx = r.get("index")
                 on = idx is not None and idx == self.stage
-                mid = y + ROW / 2.0
+                mid = y + row_h / 2.0
                 if on:
-                    _rounded(cv, 12, y + 1, max(w - 12, right), y + ROW - 1, 5, fill=c["select"], outline="")
+                    _rounded(cv, P(12), y + P(1), max(w - P(12), right), y + row_h - P(1), P(5), fill=c["select"],
+                             outline="")
                 if "arc" in r:
                     cell_row = r["kind"] in ("cell", "ckq")
                     values = [r["label"], r["cell"] or "port", r["arc"], r["rf"],
-                              _num(r["load"]) if r["load"] is not None else "", _num(r["slew"]),
+                              _num(r["load"]) if r["load"] is not None else "",
+                              "" if r["fanout"] is None else str(r["fanout"]), _num(r["slew"]),
                               ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), fmt4(r["value"]),
                               _num(r["rat"]), _num(r["slack"])]
                     for k, (v, (cx, cw, anchor)) in enumerate(zip(values, xs)):
                         colour = "ink"
-                        if k in (1, 2, 3, 4, 5, 8):
+                        if k in (1, 2, 3, 4, 5, 6, 9):
                             colour = "muted"
-                        elif k == 6 and not cell_row:
+                        elif k == 7 and not cell_row:
                             colour = "faint"
-                        elif k == 9 and r["slack"] is not None:
+                        elif k == 10 and r["slack"] is not None:
                             colour = "bad" if _neg(r["slack"]) else "ok"
-                        self._text(cv, cx + (cw - 6 if anchor == "e" else 0), mid, v, "ui" if k < 4 else "mono",
-                                   12 if k < 4 else 11, k == 0 and on, colour, anchor)
-                    hit = cv.create_rectangle(0, y, w, y + ROW, outline="", fill="")
+                        bold = (k == 0 and on) or (k == 7 and r["largest"])
+                        self._text(cv, cx + (cw - P(6) if anchor == "e" else 0), mid, v, "ui" if k < 4 else "mono",
+                                   12 if k < 4 else 11, bold, colour, anchor)
+                    hit = cv.create_rectangle(0, y, w, y + row_h, outline="", fill="")
                     self._hit(cv, hit, lambda k=idx: self.select_stage(k))
                 else:
                     label = r["label"] + ("  (%s)" % r["cell"] if r.get("cell") else "")
                     self._text(cv, xs[0][0], mid, label, "ui", 12, False, "ink" if r.get("cell") else "muted")
                     if r.get("incr") is not None:
-                        self._text(cv, num(6), mid, ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), "mono", 11,
+                        self._text(cv, num(7), mid, ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), "mono", 11,
                                    False, "muted", "e")
-                    self._text(cv, num(7), mid, fmt4(r["value"]), "mono", 11, r["label"] == "required", "ink", "e")
+                    self._text(cv, num(8), mid, fmt4(r["value"]), "mono", 11, r["label"] == "required", "ink", "e")
                     if idx is not None:
-                        hit = cv.create_rectangle(0, y, w, y + ROW, outline="", fill="")
+                        hit = cv.create_rectangle(0, y, w, y + row_h, outline="", fill="")
                         self._hit(cv, hit, lambda k=idx: self.select_stage(k))
-                y += ROW
-            y += 10
+                y += row_h
+            y += P(10)
         bad = _neg(path["slack"])
-        cv.create_line(24, y, right, y, fill=c["strong"])
-        mid = y + ROW / 2.0 + 4
-        self._run(cv, 24, mid, [("slack", "ui", 12, True, "ink", 10),
+        cv.create_line(P(24), y, right, y, fill=c["strong"])
+        mid = y + row_h / 2.0 + P(4)
+        self._run(cv, P(24), mid, [("slack", "ui", 12, True, "ink", 10),
                                 (self._caps("violated" if bad else "met"), "ui", 9, True, "bad" if bad else "ok", 0)])
-        self._text(cv, num(7), mid, fmt4(path["slack"]), "mono", 12, True, "bad" if bad else "ok", "e")
-        self._text(cv, right + 12, mid, "pin slack: the worst slack through the pin", "ui", 10, False, "faint")
-        cv.configure(scrollregion=(0, 0, max(w, right + 260), y + ROW + 24))
+        self._text(cv, num(8), mid, fmt4(path["slack"]), "mono", 12, True, "bad" if bad else "ok", "e")
+        note = self._text(cv, right + P(12), mid, "pin slack: the worst slack through the pin", "ui", 10, False, "faint")
+        cv.configure(scrollregion=(0, 0, max(w, cv.bbox(note)[2] + P(12)), y + row_h + P(24)))
 
     # right: inspector -----------------------------------------------------------------------
 
     def _draw_inspector(self):
-        cv, c = self.insp, self.c
+        cv, c, P = self.insp, self.c, self.px
         self._clear(cv)
-        w = max(cv.winfo_width(), MIN_RIGHT)
+        w = max(cv.winfo_width(), P(MIN_RIGHT))
         sel = self.selected
-        y = 34
+        y = P(34)
         if not sel:
             return
         if sel.startswith("cell:"):
             self._inspect_cell(sel[5:], y)
             return
         info = self.source.pin(sel)
-        self._text(cv, 20, y, sel, "ui", 16, True, "ink")
-        y += 22
+        self._text(cv, P(20), y, sel, "ui", 16, True, "ink")
+        y += P(22)
         path = self.path()
         point = None
         if path and self.stage is not None and path["points"][self.stage]["pin"] == sel:
             point = path["points"][self.stage]
         if info is None:
-            self._text(cv, 20, y, "not in this bundle", "ui", 11, False, "muted")
+            self._text(cv, P(20), y, "not in this bundle", "ui", 11, False, "muted")
             return
         kind = {"PI": "input port", "PO": "output port", "CK": "clock pin", "D": "data pin · endpoint",
                 "clock_port": "clock port"}.get(info["kind"])
         if kind is None:
             pins = self.source.instance(sel.split("/")[0])["pins"]
             kind = [p["direction"] for p in pins if p["name"] == sel.split("/")[1]][0] + " pin"
-        self._text(cv, 20, y, "%s%s" % ((info["cell"] + " · ") if info["cell"] else "", kind), "ui", 11, False, "muted")
-        y += 28
+        self._text(cv, P(20), y, "%s%s" % ((info["cell"] + " · ") if info["cell"] else "", kind), "ui", 11, False,
+                   "muted")
+        y += P(28)
         y = self._values_card(info, y)
         if point is not None:
             y = self._lookup_card(point, y)
         rf = point["rf"] if point is not None else (self.source.arrival(sel, self.check) or (None, "r"))[1]
         y = self._merge_card("arrival set by", self.source.fanin(sel, self.check, rf), "from", rf, y)
         y = self._merge_card("required set by", self.source.fanout(sel, self.check, rf), "to", rf, y)
-        cv.configure(scrollregion=(0, 0, w, y + 20))
+        cv.configure(scrollregion=(0, 0, w, y + P(20)))
 
     def _values_card(self, info, y):
-        cv, w = self.insp, max(self.insp.winfo_width(), MIN_RIGHT)
+        P = self.px
+        cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
         y = self._section(cv, y, "timing", w)
-        x = [w - 206, w - 144, w - 82, w - 20]          # right edges: late r, late f, early r, early f
-        self._eyebrow(cv, x[1], y - 2, "late", "e")
-        self._eyebrow(cv, x[3], y - 2, "early", "e")
+        x = [w - P(206), w - P(144), w - P(82), w - P(20)]     # right edges: late r, late f, early r, early f
+        self._eyebrow(cv, x[1], y - P(2), "late", "e")
+        self._eyebrow(cv, x[3], y - P(2), "early", "e")
         for i, rf in enumerate(("r", "f", "r", "f")):
-            self._text(cv, x[i], y + 16, rf, "mono", 9, False, "faint", "e")
-        yy = y + 38
+            self._text(cv, x[i], y + P(16), rf, "mono", 9, False, "faint", "e")
+        yy = y + P(38)
         for label, vals in (("AT", info["at"]), ("RAT", info["rat"]), ("slew", info["slew"])):
-            self._text(cv, 20, yy, label, "ui", 11, False, "muted")
+            self._text(cv, P(20), yy, label, "ui", 11, False, "muted")
             for i, (m, rf) in enumerate((("late", "r"), ("late", "f"), ("early", "r"), ("early", "f"))):
                 self._text(cv, x[i], yy, _num(vals[m][rf]), "mono", 10, False, "ink", "e")
-            yy += 22
-        yy += 10
+            yy += P(22)
+        yy += P(10)
         for label, v in (("setup slack", info["slack"]["setup"]), ("hold slack", info["slack"]["hold"]), ("load", info["load"])):
             if v is None and label == "load":
                 continue
             colour = "ink" if label == "load" else ("faint" if v is None else ("bad" if _neg(v) else "ok"))
-            self._text(cv, 20, yy, label, "ui", 11, False, "muted")
-            self._text(cv, w - 20, yy, _num(v), "mono", 11, False, colour, "e")
-            yy += 22
-        return yy + 8
+            self._text(cv, P(20), yy, label, "ui", 11, False, "muted")
+            self._text(cv, w - P(20), yy, _num(v), "mono", 11, False, colour, "e")
+            if label == "load" and info.get("fanout") is not None:
+                self._run(cv, w - P(170), yy, [("fanout", "ui", 10, False, "faint", 5),
+                                               (str(info["fanout"]), "mono", 11, False, "ink", 0)])
+            yy += P(22)
+        return yy + P(8)
 
     def _lookup_card(self, point, y):
         """Why this stage costs what it costs: the table lookup behind the delay (walkthrough §10)."""
-        cv, w = self.insp, max(self.insp.winfo_width(), MIN_RIGHT)
+        P = self.px
+        cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
         path = self.path()
         pts = path["points"]
         k = self.stage
@@ -1209,61 +1212,99 @@ class App:
         else:
             title = "launch"
             lines = [("start", "%s at %s" % (point["pin"], fmt4(point["at"])))]
+        grids = dict(model.lookups(path, self.source, k))      # engine mode only
         yy = self._section(cv, y, title, w)
         for label, value in lines:
             result = label.startswith("→")
-            self._text(cv, 20, yy, label, "ui", 11, False, "ink" if result else "muted")
-            self._text(cv, w - 20, yy, value, "mono", 11, result, "ink", "e")
-            yy += 22
-        return yy + 8
+            self._text(cv, P(20), yy, label, "ui", 11, False, "ink" if result else "muted")
+            self._text(cv, w - P(20), yy, value, "mono", 11, result, "ink", "e")
+            yy += P(22)
+            if result and label[2:] in grids:
+                yy = self._lookup_grid(grids[label[2:]], yy - P(2))
+        return yy + P(8)
+
+    def _lookup_grid(self, d, y):
+        """One lookup.lookup_detail block under its result line: each axis (row = the table's
+        first variable, col = its second) with its query value and, when outside the grid,
+        `extrapolated below / above`; then the four corner values under the bracketing index
+        values."""
+        P = self.px
+        cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
+        for tag, name, query, side in zip(("row", "col"), d["axes"], d["query"], d["extrapolated"]):
+            _, x, _ = self._run(cv, P(34), y, [(tag, "ui", 9, False, "faint", 6), (name, "ui", 10, False, "muted", 0)])
+            if x + P(8) > w - P(20) - self.font("mono", 10).measure(fmt4(query)):
+                y += P(16)               # a long axis name: its value goes under it
+            self._text(cv, w - P(20), y, fmt4(query), "mono", 10, False, "ink", "e")
+            y += P(16)
+            if side:
+                self._text(cv, P(58), y, "extrapolated " + side, "ui", 10, False, "bad")
+                y += P(16)
+        cols = (w - P(96), w - P(20))
+        (row_lo, row_hi), (col_lo, col_hi) = d["bracket"]
+        for x, v in zip(cols, (col_lo, col_hi)):
+            self._text(cv, x, y, fmt4(v), "mono", 10, False, "faint", "e")
+        y += P(16)
+        for i, v in enumerate((row_lo, row_hi)):
+            self._text(cv, w - P(172), y, fmt4(v), "mono", 10, False, "faint", "e")
+            for x, corner in zip(cols, d["corners"][i]):
+                self._text(cv, x, y, fmt4(corner), "mono", 10, False, "ink", "e")
+            y += P(16)
+        return y + P(8)
 
     def _merge_card(self, title, cands, key, rf, y):
-        cv, w = self.insp, max(self.insp.winfo_width(), MIN_RIGHT)
+        P = self.px
+        cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
         if not cands:
             return y
         mode_word = ("max" if self.check == "setup" else "min") if key == "from" else ("min" if self.check == "setup" else "max")
+        limit = model.near_critical(self.source.period)
         yy = self._section(cv, y, "%s · %s of %d · %s" % (title, mode_word, len(cands), rf), w)
+        self._text(cv, P(20), yy - P(6), "near-critical: margin < %s" % fmt4(limit), "mono", 9, False, "faint")
+        yy += P(16)
         for i, cand in enumerate(cands):
             pin = cand[key]
             win = i == 0
-            self._text(cv, 20, yy, "●" if win else "○", "ui", 8, False, "ink" if win else "faint")
-            t = self._text(cv, 34, yy, "%s  %s" % (pin, cand["rf"]), "ui", 12, win, "ink" if win else "muted")
-            self._text(cv, w - 20, yy, fmt4(cand["value"]), "mono", 11, win, "ink" if win else "muted", "e")
+            self._text(cv, P(20), yy, "●" if win else "○", "ui", 8, False, "ink" if win else "faint")
+            t = self._text(cv, P(34), yy, "%s  %s" % (pin, cand["rf"]), "ui", 12, win, "ink" if win else "muted")
+            self._text(cv, w - P(20), yy, fmt4(cand["value"]), "mono", 11, win, "ink" if win else "muted", "e")
             if key == "from":
                 expr = "AT %s + %s %s" % (fmt4(cand["at"]), cand["kind"], fmt4(cand["delay"]))
             else:
                 expr = "RAT %s − %s %s" % (fmt4(cand["rat"]), cand["kind"], fmt4(cand["delay"]))
-            self._text(cv, 34, yy + 17, expr, "mono", 10, False, "faint")
+            e = self._text(cv, P(34), yy + P(17), expr, "mono", 10, False, "faint")
+            extra = 0                    # the margin goes under the expression when both do not fit
             if not win:
-                near = cand["margin"] < 0.05
-                self._text(cv, w - 20, yy + 17, "Δ %s" % fmt4(cand["margin"]), "mono", 10, False,
-                           "bad" if near else "faint", "e")
-            hit = cv.create_rectangle(12, yy - 12, w - 12, yy + 26, outline="", fill="")
+                near = cand["margin"] < limit - 1e-9
+                margin = "Δ %s" % fmt4(cand["margin"])
+                if cv.bbox(e)[2] + P(8) > w - P(20) - self.font("mono", 10).measure(margin):
+                    extra = P(15)
+                self._text(cv, w - P(20), yy + P(17) + extra, margin, "mono", 10, False, "bad" if near else "faint", "e")
+            hit = cv.create_rectangle(P(12), yy - P(12), w - P(12), yy + P(26) + extra, outline="", fill="")
             for it in (t, hit):
                 self._hit(cv, it, lambda k=pin: self.select_pin(k))
-            yy += 44
+            yy += P(44) + extra
         return yy
 
     def _inspect_cell(self, inst, y):
-        cv, w = self.insp, max(self.insp.winfo_width(), MIN_RIGHT)
+        P = self.px
+        cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
         info = self.source.instance(inst)
-        self._text(cv, 20, y, inst, "ui", 16, True, "ink")
-        self._text(cv, 20, y + 22, "%s · %s" % (info["cell"], model.symbol(info)), "ui", 11, False, "muted")
-        y += 50
+        self._text(cv, P(20), y, inst, "ui", 16, True, "ink")
+        self._text(cv, P(20), y + P(22), "%s · %s" % (info["cell"], model.symbol(info)), "ui", 11, False, "muted")
+        y += P(50)
         for a in self.source.arcs(inst):
             late = [(ab, v) for ab, v in sorted(a["delay"]["late"].items()) if v is not None]
             yy = self._section(cv, y, "%s → %s · %s" % (a["from"].split("/")[-1], a["to"].split("/")[-1], a["kind"]), w)
             for ab, v in late:
-                self._text(cv, 20, yy, "late %s→%s" % (ab[0], ab[1]), "ui", 11, False, "muted")
-                self._text(cv, w - 20, yy, fmt4(v), "mono", 11, False, "ink", "e")
-                yy += 22
-            y = yy + 4
-        cv.configure(scrollregion=(0, 0, w, y + 20))
+                self._text(cv, P(20), yy, "late %s→%s" % (ab[0], ab[1]), "ui", 11, False, "muted")
+                self._text(cv, w - P(20), yy, fmt4(v), "mono", 11, False, "ink", "e")
+                yy += P(22)
+            y = yy + P(4)
+        cv.configure(scrollregion=(0, 0, w, y + P(20)))
 
     def _draw_status(self):
         cv, c = self.status, self.c
         self._clear(cv)
-        w = max(cv.winfo_width(), 1200)
+        w = max(cv.winfo_width(), self.min_width)
         cv.create_line(0, 0, w, 0, fill=c["line"])
-        note = self.source.note
-        self._text(cv, 20, 13, note or HINT, "ui", 10, False, "accent_ink" if note else "faint")
+        self._text(cv, self.px(20), self.px(13), HINT, "ui", 10, False, "faint")
