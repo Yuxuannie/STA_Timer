@@ -46,7 +46,8 @@ def _node(n, d):
     return {"pin": n.name, "cell": n.cell, "kind": n.kind, "depth": d,
             "at": _values(n.at), "rat": _values(n.rat), "slew": _values(n.slew),
             "slack": _slack(n),
-            "cap": num(n.load) if any(a.kind == "net" for a in n.fanout) else None}
+            "cap": num(n.load) if any(a.kind == "net" for a in n.fanout) else None,
+            "fanout": sum(1 for a in n.fanout if a.kind == "net") or None}
 
 
 def _delay(arc):

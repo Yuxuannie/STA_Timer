@@ -133,6 +133,8 @@ class ValueTests(unittest.TestCase):
                          ("D", "DFF", None))
         self.assertEqual((nodes["x"]["kind"], nodes["x"]["cell"], nodes["x"]["cap"]), ("PI", None, 0.0015))
         self.assertEqual(nodes["U2/Y"]["cap"], 0.002)
+        # P5 / R34: fanout counts the pin's net arcs; null where the pin drives no net.
+        self.assertEqual((nodes["U2/Y"]["fanout"], nodes["x"]["fanout"], nodes["FF2/D"]["fanout"]), (1, 1, None))
         # golden FF2/CK: setup 7.0 - 0.0, hold 0.0 - (-0.9); no falling values.
         self.assertEqual(nodes["FF2/CK"]["slack"], {"setup": 7.0, "hold": 0.9})
 

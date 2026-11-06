@@ -33,7 +33,7 @@ the check arcs from that pin) when both ends are kept.
              "rat":  {...same shape...},
              "slew": {...same shape...},
              "slack": {"setup": .., "hold": ..},
-             "cap": LOAD|null}],
+             "cap": LOAD|null, "fanout": N|null}],
   "edges": [{"u": <src>, "v": <dst>, "kind": "net"|"cell"|"ckq"|"check",
              "delay": {"late": {"rr": .., "rf": .., "fr": .., "ff": ..}, "early": {...}},
              "check": {"setup": {"r": .., "f": ..}, "hold": {"r": .., "f": ..}}|null}],
@@ -57,3 +57,11 @@ the check arcs from that pin) when both ends are kept.
 - `instances` = every instance with a kept node or a point on one of the paths, sorted by
   name, with its cell and all its library signal pins in library order (so a viewer can
   draw the cell as a module with every pin).
+
+## Changes in P5 (2026-11-05)
+
+- Node field `fanout` (R34): the number of net arcs leaving the pin in the whole design
+  (not only inside the cone), null when the pin drives no net (input pins, D pins,
+  output ports). Additive; the schema string stays `sta_toy.bundle/1`. Why: the viewer
+  shows fanout beside `load`, and a bundle's edges stop at the cone, so counting them
+  would undercount. Older bundles without the field load; the viewer shows no fanout.

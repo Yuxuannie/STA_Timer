@@ -244,6 +244,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(b.paths("FF5/D")["setup"]["slack"], 1.1373)
         for pin in b.nodes:
             self.assertEqual(b.arrival(pin, "setup")[1], src.arrival(pin, "setup")[1], pin)
+            self.assertEqual(b.pin(pin)["fanout"], src.pin(pin)["fanout"], pin)   # R34
             if "/" in pin:
                 self.assertEqual(b.instance(pin.split("/")[0]), src.instance(pin.split("/")[0]))
             if b.driver(pin) is not None:
