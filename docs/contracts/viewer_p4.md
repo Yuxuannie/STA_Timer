@@ -261,12 +261,14 @@ log (`trace.md`) for the selected endpoint. Written before the code.
   is drawn faint and neither a click nor `3` opens it. In the Trace tab the tab strip gets a
   second row: `◀ step back`, `▶ step`, `▶▶ run to end` and the phase label, plus
   `truncated` when the auto-expansion stopped. The view is the auto-expanded schematic of
-  the current check's worst path with the current entry's pin ringed; badges show
-  `<at> <rf>` (and `rat <rat>`) only once reached, from the replay; cell delay labels show
-  the winner delay once reached; stub arrival labels are blank. The path table is
+  the current check's worst path with the current entry's pin ringed (canvas tag `ring`);
+  AT badges show `<at> <rf>` only once reached, from the replay (RAT is shown in the table
+  and the inspector); cell delay labels show the winner delay once reached; stub arrival
+  labels are blank. The Data path total (Σ) is not shown in the Trace tab (it is a sum). The path table is
   `trace_table`; blank cells are empty. The inspector shows the current entry: its pin,
   phase, mode / kind, rf and position, the pin's AT / RAT / slew from the replay (blank
   until reached), then the entry itself - its candidates winner first (forward: `AT +
   delay = value`, backward: `RAT − delay = value`), or its check terms, slack terms or
   path points. Test hooks: `trace_step(delta)`, `trace_end()`; `app.replay` is the current
-  endpoint's replay (`None` in bundle mode).
+  endpoint's replay (`None` in bundle mode). The slack rows of the inspector show the
+  endpoint's slack entry for the rf of that check's worst path, blank for other pins.

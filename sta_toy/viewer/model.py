@@ -523,3 +523,114 @@ def waveform(setup, hold, period, check="setup", text_width=None, axis_px=None):
     for row, lines in zip(rows[:2], ([], [m["required"] for m in marks])):
         row["labels"] = _edge_labels(row, span, lines, text_width, units)
     return {"span": span, "rows": rows, "marks": marks}
+
+
+# ------------------------------------------------------------------------- R41 trace replay
+
+class Replay:
+    """Steps through trace entries (trace.md); the values reached are read from entries
+    0..k, never computed."""
+
+    def __init__(self, entries):
+        self.entries = list(entries)
+        self.k = 0
+
+    @property
+    def current(self):
+        return self.entries[self.k] if self.entries else None
+
+    @property
+    def at_end(self):
+        return self.k >= len(self.entries) - 1
+
+    @property
+    def label(self):
+        if not self.entries:
+            return "no trace entries"
+        return "%s · %d of %d" % (self.current["phase"], self.k + 1, len(self.entries))
+
+    def step(self, delta):
+        self.k = max(0, min(len(self.entries) - 1, self.k + delta))
+
+    def run_to_end(self):
+        self.k = max(0, len(self.entries) - 1)
+
+    def _find(self, test):
+        """The latest reached entry passing `test`, or None."""
+        for x in reversed(self.entries[:self.k + 1]):
+            if test(x):
+                return x
+        return None
+
+    def forward(self, pin, mode, rf):
+        """{at, slew, delay} of the forward entry of (pin, mode, rf); delay is the winner
+        candidate's (None for a source)."""
+        x = self._find(lambda x: x["phase"] == "forward" and (x["pin"], x["mode"], x["rf"]) == (pin, mode, rf))
+        if x is None:
+            return None
+        delay = x["candidates"][x["winner"]]["delay"] if x["winner"] is not None else None
+        return {"at": x["at"], "slew": x["slew"], "delay": delay}
+
+    def rat(self, pin, mode, rf):
+        kind = "setup" if mode == "late" else "hold"
+        x = self._find(lambda x: x["pin"] == pin and x["rf"] == rf and
+                       ((x["phase"] == "backward" and x["mode"] == mode) or
+                        (x["phase"] == "check" and x["kind"] == kind)))
+        return None if x is None else x["rat"]
+
+    def check(self, pin, kind, rf):
+        return self._find(lambda x: x["phase"] == "check" and (x["pin"], x["kind"], x["rf"]) == (pin, kind, rf))
+
+    def slack(self, pin, kind, rf):
+        x = self._find(lambda x: x["phase"] == "slack" and (x["pin"], x["kind"], x["rf"]) == (pin, kind, rf))
+        return None if x is None else x["slack"]
+
+    @staticmethod
+    def ordered(entry):
+        """The entry's candidates, the winner first, then the others in log order."""
+        cands = entry.get("candidates") or []
+        w = entry.get("winner")
+        if w is None:
+            return list(cands)
+        return [cands[w]] + [c for i, c in enumerate(cands) if i != w]
+
+
+def trace_table(sections, path, replay):
+    """path_table sections for the Trace tab: data rows take slew, incr, AT, RAT and slack
+    from the replay (None = not reached); other rows keep their path-object values, blank
+    until the replay reaches the first point (source / input section) or the endpoint's
+    check entry (destination section). Returns (sections, final slack or None)."""
+    mode, check = MODE[path["check"]], path["check"]
+    pts = path["points"]
+    first = replay.forward(pts[0]["pin"], mode, pts[0]["rf"]) is not None
+    end = pts[-1]
+    checked = replay.check(end["pin"], check, end["rf"]) is not None
+    out = []
+    for n, sec in enumerate(sections):
+        rows = []
+        for r in sec["rows"]:
+            r = dict(r)
+            if "arc" in r:
+                rf = r["rf"][-1]
+                f = replay.forward(r["label"], mode, rf) or {}
+                r.update(slew=f.get("slew"), incr=f.get("delay"), value=f.get("at"),
+                         rat=replay.rat(r["label"], mode, rf), slack=replay.slack(r["label"], check, rf))
+                r["largest"] = r["largest"] and r["incr"] is not None
+            elif (n == 0 and not first) or (n == 2 and not checked):
+                r.update(incr=None, value=None)
+            rows.append(r)
+        out.append({"title": sec["title"], "rows": rows})
+    return out, replay.slack(end["pin"], check, end["rf"])
+
+
+def auto_expand(path, source, limit=300):
+    """The schematic with every side input expanded, round by round, until no expand stub
+    is left or the drawing has `limit` pins or more. Returns (layout, truncated)."""
+    expanded = []
+    while True:
+        lay = schematic(path, source, expanded)
+        stubs = [s["pin"] for s in lay["stubs"] if s["state"] == "expand"]
+        pins = sum(len(e["pins"]) for e in lay["elements"])
+        if not stubs or pins >= limit:
+            return lay, bool(stubs)
+        expanded = lay["expanded"] + stubs

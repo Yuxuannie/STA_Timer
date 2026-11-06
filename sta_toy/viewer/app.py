@@ -24,11 +24,12 @@ from sta_toy.viewer.sizing import MIN_CENTER, MIN_LEFT, MIN_RIGHT
 # Pixel constants below are at scale 1.
 ROW = 26
 THIN = "\u2009"
-TABS = ("schematic", "waveform")
+TABS = ("schematic", "waveform", "trace")
+DRAWN = ("schematic", "trace")          # views that draw the schematic (pan, zoom, fit)
 TABLE = [("pin", 128, "w"), ("cell", 62, "w"), ("arc", 58, "w"), ("rf", 44, "w"), ("load", 66, "e"),
          ("fanout", 66, "e"), ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"),
          ("pin slack", 100, "e")]
-HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2 views   [ / ] hide panels   "
+HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2/3 views   [ / ] hide panels   "
         "drag a divider to resize   click ⊕ to open the driving cell   ⌘-scroll zoom   F fit")
 
 
@@ -72,6 +73,7 @@ class App:
         self.expansions = {}
         self.selected, self.stage, self.bin = None, None, None
         self.zoom, self.layout, self._fitted = 1.0, None, False
+        self.replays, self.trace_truncated = {}, False
         self.errors, self.hits = [], {}
         self.sizes = dict((k, self.ipx(v)) for k, v in (("left", 300), ("right", 320), ("hist", 214),
                                                         ("summary", 168), ("table", 300)))
@@ -184,7 +186,7 @@ class App:
         self.view = self._canvas(views, "bg")
         self.view.pack(fill="both", expand=True)
         self.view.bind("<ButtonPress-1>", self._view_press)
-        self.view.bind("<B1-Motion>", lambda e: self.tab == "schematic" and self.view.scan_dragto(e.x, e.y, gain=1))
+        self.view.bind("<B1-Motion>", lambda e: self.tab in DRAWN and self.view.scan_dragto(e.x, e.y, gain=1))
         self.view.bind("<Configure>", lambda e: self._on_view_resize())
         self._scrollable(self.view, zoom=True)
         center.add(views, minsize=ipx(sizing.MIN_VIEWS), stretch="always")
@@ -262,6 +264,7 @@ class App:
                       ("<Up>", lambda: self.next_endpoint(-1)), ("<Down>", lambda: self.next_endpoint(1)),
                       ("<Key-s>", lambda: self.set_check("setup")), ("<Key-h>", lambda: self.set_check("hold")),
                       ("<Key-1>", lambda: self.set_tab("schematic")), ("<Key-2>", lambda: self.set_tab("waveform")),
+                      ("<Key-3>", lambda: self.set_tab("trace")),
                       ("<Key-f>", self.fit),
                       ("<Key-bracketleft>", lambda: self.toggle_panel("left")),
                       ("<Key-bracketright>", lambda: self.toggle_panel("right"))):
@@ -299,8 +302,29 @@ class App:
         self.refresh(fit=True)
 
     def set_tab(self, tab):
+        if tab == "trace" and self.source.mode != "engine":
+            return                      # R41: the trace replays the engine's log
         self.tab = tab
-        self.refresh(fit=tab == "schematic")
+        self.refresh(fit=tab in DRAWN)
+
+    @property
+    def replay(self):
+        """R41: the replay of the current endpoint's trace (engine mode), made on first use."""
+        if self.source.mode != "engine" or self.endpoint is None:
+            return None
+        if self.endpoint not in self.replays:
+            self.replays[self.endpoint] = model.Replay(self.source.trace(self.endpoint))
+        return self.replays[self.endpoint]
+
+    def trace_step(self, delta):
+        self.replay.step(delta)
+        self.refresh(fit=False)
+        self._see(self.replay.current["pin"] if self.replay.current else None)
+
+    def trace_end(self):
+        self.replay.run_to_end()
+        self.refresh(fit=False)
+        self._see(self.replay.current["pin"] if self.replay.current else None)
 
     def set_filter(self, text):
         self.endpoints.text = text
@@ -359,7 +383,7 @@ class App:
         self._draw_tabs()
 
     def fit(self):
-        if self.tab != "schematic" or not self.layout:
+        if self.tab not in DRAWN or not self.layout:
             self._draw_view()
             return
         w, h = self.view.winfo_width(), self.view.winfo_height()
@@ -380,7 +404,7 @@ class App:
             self._draw_view()
 
     def _see(self, pin):
-        if self.tab != "schematic" or not self.layout:
+        if self.tab not in DRAWN or not self.layout:
             return
         pins = sorted([p for e in self.layout["elements"] for p in e["pins"] if p["pin"] == pin],
                       key=lambda q: not q["on_path"])
@@ -410,16 +434,20 @@ class App:
         return False
 
     def _view_press(self, event):
-        if not self._click(self.view, event) and self.tab == "schematic":
+        if not self._click(self.view, event) and self.tab in DRAWN:
             self.view.scan_mark(event.x, event.y)
 
     # ------------------------------------------------------------------ drawing
 
     def refresh(self, fit=False):
         path = self.path()
-        self.layout = model.schematic(path, self.source, self.expanded) if path else None
-        if self.layout:
-            self.expanded[:] = self.layout["expanded"]
+        self.trace_truncated = False
+        if path and self.tab == "trace":        # R41: the whole cone, user expansions untouched
+            self.layout, self.trace_truncated = model.auto_expand(path, self.source)
+        else:
+            self.layout = model.schematic(path, self.source, self.expanded) if path else None
+            if self.layout:
+                self.expanded[:] = self.layout["expanded"]
         if fit:
             self._fitted = False
             self.root.update_idletasks()
@@ -729,18 +757,24 @@ class App:
         self._clear(cv)
         w = max(cv.winfo_width(), P(MIN_CENTER))
         base = self.ipx(40) - 1
-        cv.create_line(0, base, w, base, fill=c["line"])
         x = P(24)
         for tab in TABS:
             on = tab == self.tab
-            t = self._text(cv, x, P(20), tab.capitalize(), "ui", 12, on, "ink" if on else "muted")
+            off = tab == "trace" and self.source.mode != "engine"     # R41: engine mode only
+            t = self._text(cv, x, P(20), tab.capitalize(), "ui", 12, on, "ink" if on else ("faint" if off else "muted"))
             x0, y0, x1, y1 = cv.bbox(t)
             if on:
                 cv.create_rectangle(x0, base - P(2), x1, base, fill=c["ink"], outline="")
-            hit = cv.create_rectangle(x0 - P(8), P(4), x1 + P(8), base - P(1), outline="", fill="")
-            self._hit(cv, hit, lambda k=tab: self.set_tab(k))
+            if not off:
+                hit = cv.create_rectangle(x0 - P(8), P(4), x1 + P(8), base - P(1), outline="", fill="")
+                self._hit(cv, hit, lambda k=tab: self.set_tab(k))
             x = x1 + P(26)
         tabs_end = x
+        rows = self._trace_controls(cv, w, base + P(17), tabs_end) if self.tab == "trace" else 1
+        height = self.ipx((40, 72, 96)[rows - 1])
+        if int(cv.cget("height")) != height:
+            cv.configure(height=height)
+        cv.create_line(0, height - 1, w, height - 1, fill=c["line"])
         if self.tab != "schematic":
             return
         controls = [("Collapse", self.collapse), ("Fit", self.fit), ("+", lambda: self.set_zoom(self.zoom * 1.2)),
@@ -762,6 +796,34 @@ class App:
         if self.expanded and x - P(10) - self.font("ui", 10).measure("9 opened") > tabs_end + P(20):
             self._text(cv, x - P(10), P(20), "%d opened" % len(self.expanded), "ui", 10, False, "faint", "e")
 
+    def _trace_controls(self, cv, w, y, tabs_end):
+        """R41: the replay's step controls on the tab strip's second row, the phase label at
+        its right end, else at the right of the tab row, else on a third row. Returns the
+        number of rows used."""
+        P, replay = self.px, self.replay
+        x = P(24)
+        for label, fn in (("◀ step back", lambda: self.trace_step(-1)), ("▶ step", lambda: self.trace_step(1)),
+                          ("▶▶ run to end", self.trace_end)):
+            t = self._text(cv, x, y, label, "ui", 11, False, "muted")
+            x0, y0, x1, y1 = cv.bbox(t)
+            hit = cv.create_rectangle(x0 - P(6), y - P(12), x1 + P(6), y + P(12), outline="", fill="")
+            for it in (t, hit):
+                self._hit(cv, it, fn)
+            x = x1 + P(20)
+        parts = [(replay.label, "mono", 10, False, "ink", 0)]
+        if self.trace_truncated:
+            parts = [("truncated", "ui", 10, False, "bad", 12)] + parts
+        n = len(replay.entries)          # place by the widest label, so the strip keeps its height
+        widest = [("backward · %d of %d" % (n, n), "mono", 10, False, "ink", 0)] + parts[:-1]
+        rows, width = 2, self._width(widest)
+        if x + width > w - P(24):
+            if tabs_end + width <= w - P(24):
+                y = P(20)
+            else:
+                rows, y = 3, y + P(24)
+        self._run(cv, w - P(24), y, parts, "e")
+        return rows
+
     # centre: views -------------------------------------------------------------------------
 
     def _draw_view(self):
@@ -773,16 +835,29 @@ class App:
             return
         getattr(self, "_draw_" + self.tab)()
 
+    def _draw_trace(self):
+        """R41: the auto-expanded schematic, the current entry's pin ringed, only replayed numbers."""
+        self._draw_schematic()
+
+    def _replayed(self, pin):
+        """(AT, rf) of an on-path pin from the replay, in the path's mode and rf; None if not reached."""
+        point = [q for q in self.path()["points"] if q["pin"] == pin]
+        f = self.replay.forward(pin, model.MODE[self.check], point[0]["rf"]) if point else None
+        return (f, point[0]["rf"]) if f else None
+
     def _draw_schematic(self):
         """Neutral line art; only the critical path (wires, leads, pins, AT labels) in the accent."""
         cv, c, z, lay = self.view, self.c, self.zoom, self.layout
+        trace = self.tab == "trace"
+        current = self.replay.current if trace else None
+        ring = (current["pin"] if current else None) if trace else self.selected
         S = lambda v: v * z * self.s     # model pixels at zoom 1 and scale 1
         w, h = max(cv.winfo_width(), self.px(200)), max(cv.winfo_height(), self.px(200))
         bw, bh = S(lay["bbox"][2]), S(lay["bbox"][3])
         ox = -(w - bw) / 2.0 if bw < w else 0       # centre a drawing smaller than the view
         oy = -(h - bh) / 2.0 if bh < h else 0
         cv.configure(scrollregion=(ox, oy, ox + max(w, bw), oy + max(h, bh)))
-        hop = model.stages(self.path())[self.stage] if self.stage is not None else None
+        hop = model.stages(self.path())[self.stage] if self.stage is not None and not trace else None
         on_path = set(p["pin"] for e in lay["elements"] for p in e["pins"] if p["on_path"])
         for wire in sorted(lay["wires"], key=lambda x: x["on_path"]):
             hot = hop is not None and hop["kind"] == "net" and wire["to"] == hop["pin"] and wire["on_path"]
@@ -796,14 +871,20 @@ class App:
             else:
                 self._draw_gate(e, S, hop)
             for p in e["pins"]:
-                if p["pin"] == self.selected and (p["on_path"] or self.selected not in on_path):
+                if p["pin"] == ring and (p["on_path"] or ring not in on_path):
                     cv.create_oval(S(p["x"] - 7), S(p["y"] - 7), S(p["x"] + 7), S(p["y"] + 7),
-                                   outline=c["focus"], width=S(1.6))
+                                   outline=c["focus"], width=S(1.6), tags=("ring", p["pin"]))
         base = dict((e["name"], p["y"]) for e in lay["elements"] for p in e["pins"] if p["on_path"] and p["side"] == "in")
         for st in lay["stubs"]:          # labels move away from the path: under the stubs below it
             self._draw_stub(st, S, st["y"] > base.get(st["pin"].split("/")[0], st["y"]))
         for b in lay["badges"]:          # knocked out of whatever runs behind them
-            t = self._text(cv, S(b["x"]), S(b["y"]), b["text"], "mono", 9 * z, False, "accent_ink", b["anchor"])
+            text = b["text"]
+            if trace:                    # R41: only what the replay has reached, from the log
+                got = self._replayed(b["pin"])
+                if got is None:
+                    continue
+                text = "%s %s" % (fmt4(got[0]["at"]), got[1])
+            t = self._text(cv, S(b["x"]), S(b["y"]), text, "mono", 9 * z, False, "accent_ink", b["anchor"])
             x0, y0, x1, y1 = cv.bbox(t)
             bg = cv.create_rectangle(x0 - S(2), y0, x1 + S(2), y1, fill=c["bg"], outline="")
             cv.tag_lower(bg, t)
@@ -880,6 +961,9 @@ class App:
         if e["arc"]:
             hot = hop is not None and hop["pin"] == e["arc"]["to"] and hop["kind"] in ("cell", "ckq")
             label = "+" + fmt4(e["arc"]["delay"])
+            if self.tab == "trace":      # R41: the winner delay once replayed
+                got = self._replayed(e["arc"]["to"])
+                label = "+" + fmt4(got[0]["delay"]) if got and got[0]["delay"] is not None else " "
             t = self._text(cv, S((x0 + x1) / 2.0), S(y1 + 9), label, "mono", 10 * z, hot,
                            "ink" if hot else "muted", "center")
             self._hit(cv, t, lambda k=e["arc"]["to"]: self.select_pin(k))
@@ -913,7 +997,8 @@ class App:
         ly, anchor = (y + 7, "ne") if below else (y - 7, "se")
         if st["state"] == "clock":
             cv.create_line(S(x - 26), S(y), S(x - 4), S(y), fill=c["wire"], dash=(2, 3), width=S(1.1))
-            self._text(cv, S(x - 4), S(ly), "clk %s" % (st["at"] or ""), "mono", 8 * z, False, "faint", anchor)
+            at = "" if self.tab == "trace" else (st["at"] or "")       # R41: no unreplayed numbers
+            self._text(cv, S(x - 4), S(ly), "clk %s" % at, "mono", 8 * z, False, "faint", anchor)
             return
         cv.create_line(S(x - model.STUB), S(y), S(x - 4), S(y), fill=c["wire"], width=S(1.1))
         hx = x - model.STUB - 7
@@ -931,7 +1016,7 @@ class App:
         if st["state"] == "none":
             label = "outside bundle" if self.source.mode == "bundle" else "unconnected"
         else:
-            label = st["at"] or ""
+            label = "" if self.tab == "trace" else (st["at"] or "")
         t = self._text(cv, S(x - 4), S(ly), label, "mono", 8 * z, False, "faint", anchor)
         self._hit(cv, t, lambda k=st["pin"]: self.select_pin(k))
 
@@ -1062,11 +1147,17 @@ class App:
         right = x
         cv.create_line(P(24), P(34), max(w - P(24), right), P(34), fill=c["line"])
         num = lambda k: xs[k][0] + xs[k][1] - P(6)       # right edge of a number column
+        trace = self.tab == "trace"
+        sections, slack = model.path_table(path, self.source), path["slack"]
+        if trace:                        # R41: replayed numbers only; not reached = blank
+            sections, slack = model.trace_table(sections, path, self.replay)
+        blank = lambda v, f=fmt4: "" if v is None else f(v)
+        signed = lambda v: "" if v is None else ("+" if v >= 0 else "") + fmt4(v)
         y = P(42)
-        for sec in model.path_table(path, self.source):
+        for sec in sections:
             self._eyebrow(cv, P(24), y + P(12), sec["title"])
             rows = sec["rows"]
-            if sec["title"] == "Data path" and rows:
+            if sec["title"] == "Data path" and rows and not trace:
                 self._text(cv, num(8), y + P(12), "Σ " + fmt4(model.summary(path)["data_path"]), "mono", 10, False,
                            "faint", "e")
             y += P(26)
@@ -1081,9 +1172,9 @@ class App:
                     cell_row = r["kind"] in ("cell", "ckq")
                     values = [r["label"], r["cell"] or "port", r["arc"], r["rf"],
                               _num(r["load"]) if r["load"] is not None else "",
-                              "" if r["fanout"] is None else str(r["fanout"]), _num(r["slew"]),
-                              ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), fmt4(r["value"]),
-                              _num(r["rat"]), _num(r["slack"])]
+                              "" if r["fanout"] is None else str(r["fanout"]),
+                              blank(r["slew"]) if trace else _num(r["slew"]), signed(r["incr"]), blank(r["value"]),
+                              blank(r["rat"]) if trace else _num(r["rat"]), blank(r["slack"]) if trace else _num(r["slack"])]
                     for k, (v, (cx, cw, anchor)) in enumerate(zip(values, xs)):
                         colour = "ink"
                         if k in (1, 2, 3, 4, 5, 6, 9):
@@ -1101,20 +1192,22 @@ class App:
                     label = r["label"] + ("  (%s)" % r["cell"] if r.get("cell") else "")
                     self._text(cv, xs[0][0], mid, label, "ui", 12, False, "ink" if r.get("cell") else "muted")
                     if r.get("incr") is not None:
-                        self._text(cv, num(7), mid, ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), "mono", 11,
-                                   False, "muted", "e")
-                    self._text(cv, num(8), mid, fmt4(r["value"]), "mono", 11, r["label"] == "required", "ink", "e")
+                        self._text(cv, num(7), mid, signed(r["incr"]), "mono", 11, False, "muted", "e")
+                    if r["value"] is not None:
+                        self._text(cv, num(8), mid, fmt4(r["value"]), "mono", 11, r["label"] == "required", "ink", "e")
                     if idx is not None:
                         hit = cv.create_rectangle(0, y, w, y + row_h, outline="", fill="")
                         self._hit(cv, hit, lambda k=idx: self.select_stage(k))
                 y += row_h
             y += P(10)
-        bad = _neg(path["slack"])
+        bad = slack is not None and _neg(slack)
         cv.create_line(P(24), y, right, y, fill=c["strong"])
         mid = y + row_h / 2.0 + P(4)
-        self._run(cv, P(24), mid, [("slack", "ui", 12, True, "ink", 10),
-                                (self._caps("violated" if bad else "met"), "ui", 9, True, "bad" if bad else "ok", 0)])
-        self._text(cv, num(8), mid, fmt4(path["slack"]), "mono", 12, True, "bad" if bad else "ok", "e")
+        parts = [("slack", "ui", 12, True, "ink", 10)]
+        if slack is not None:
+            parts.append((self._caps("violated" if bad else "met"), "ui", 9, True, "bad" if bad else "ok", 0))
+            self._text(cv, num(8), mid, fmt4(slack), "mono", 12, True, "bad" if bad else "ok", "e")
+        self._run(cv, P(24), mid, parts)
         note = self._text(cv, right + P(12), mid, "pin slack: the worst slack through the pin", "ui", 10, False, "faint")
         cv.configure(scrollregion=(0, 0, max(w, cv.bbox(note)[2] + P(12)), y + row_h + P(24)))
 
@@ -1126,6 +1219,9 @@ class App:
         w = max(cv.winfo_width(), P(MIN_RIGHT))
         sel = self.selected
         y = P(34)
+        if self.tab == "trace" and self.replay is not None:
+            self._inspect_step(y)
+            return
         if not sel:
             return
         if sel.startswith("cell:"):
@@ -1157,7 +1253,84 @@ class App:
         y = self._merge_card("required set by", self.source.fanout(sel, self.check, rf), "to", rf, y)
         cv.configure(scrollregion=(0, 0, w, y + P(20)))
 
-    def _values_card(self, info, y):
+    def _inspect_step(self, y):
+        """R41: the current trace entry - its pin's values as far as the replay has reached
+        (blank otherwise), then the entry itself, candidates winner first."""
+        P, cv, replay = self.px, self.insp, self.replay
+        w = max(cv.winfo_width(), P(MIN_RIGHT))
+        x = replay.current
+        if x is None:
+            self._text(cv, P(20), y, replay.label, "ui", 12, False, "muted")
+            return
+        pin = x["pin"]
+        self._text(cv, P(20), y, pin, "ui", 16, True, "ink")
+        how = x.get("mode") or x.get("kind")
+        self._text(cv, P(20), y + P(22), " · ".join(v for v in (how, x.get("rf"), replay.label) if v), "ui", 11, False,
+                   "muted")
+        y += P(50)
+        info = self.source.pin(pin) or {"load": None}
+        values = {"at": {}, "rat": {}, "slew": {}, "load": info["load"], "fanout": info.get("fanout"),
+                  "slack": {}}
+        for m in ("late", "early"):
+            for key in ("at", "rat", "slew"):
+                values[key][m] = {}
+            for rf in ("r", "f"):
+                f = replay.forward(pin, m, rf) or {}
+                values["at"][m][rf], values["slew"][m][rf] = f.get("at"), f.get("slew")
+                values["rat"][m][rf] = replay.rat(pin, m, rf)
+        for kind in ("setup", "hold"):
+            p = self.paths.get(kind)
+            end = p["points"][-1] if p and p["points"][-1]["pin"] == pin else None
+            values["slack"][kind] = replay.slack(pin, kind, end["rf"]) if end else None
+        y = self._values_card(values, y, blank=True)
+        rows = []                        # (left, right, bold): every number from the entry
+        if x["phase"] == "forward":
+            title = "forward · %s %s" % (x["mode"], x["rf"])
+            rows.append(("AT", fmt4(x["at"]), True))
+            rows.append(("slew (worst)", fmt4(x["slew"]), False))
+            if x["source"]:
+                rows.append(("source", x["source"], False))
+        elif x["phase"] == "backward":
+            title = "backward · %s %s" % (x["mode"], x["rf"])
+            rows.append(("RAT", fmt4(x["rat"]), True))
+        elif x["phase"] == "check":
+            title = "check · %s %s" % (x["kind"], x["rf"])
+            rows.append(("RAT", fmt4(x["rat"]), True))
+            terms = (("ck_at", x["ck_at"]), ("period", x["period"] if x["kind"] == "setup" else None), ("t", x["t"]),
+                     ("uncertainty", x["uncertainty"]), ("output_delay", x["output_delay"]),
+                     ("d_slew", x["d_slew"]), ("ck_slew", x["ck_slew"]))
+            rows += [(name, fmt4(v), False) for name, v in terms if v is not None]
+            if x["ck"]:
+                rows.append(("clock pin", x["ck"], False))
+        elif x["phase"] == "slack":
+            title = "slack · %s %s" % (x["kind"], x["rf"])
+            rows += [("AT", _num(x["at"]), False), ("RAT", _num(x["rat"]), False), ("slack", _num(x["slack"]), True)]
+        else:
+            title = "worst %s path" % x["kind"]
+            rows += [("%d" % (i + 1), "%s %s" % (n, rf), False) for i, (n, rf) in enumerate(x["points"])]
+        y = self._section(cv, y, title, w)
+        for left, right, bold in rows:
+            self._text(cv, P(20), y, left, "ui", 11, False, "muted")
+            self._text(cv, w - P(20), y, right, "mono", 11, bold, "ink", "e")
+            y += P(22)
+        cands = model.Replay.ordered(x)
+        if cands:
+            forward = x["phase"] == "forward"
+            y = self._section(cv, y + P(8), "candidates · %d · winner first" % len(cands), w)
+            for i, cand in enumerate(cands):
+                self._text(cv, P(20), y, "●" if i == 0 else "○", "ui", 8, False, "ink" if i == 0 else "faint")
+                self._text(cv, P(34), y, "%s  %s" % (cand["src"] if forward else cand["dst"], cand["rf"]), "ui", 12,
+                           i == 0, "ink" if i == 0 else "muted")
+                self._text(cv, w - P(20), y, fmt4(cand["value"]), "mono", 11, i == 0, "ink" if i == 0 else "muted", "e")
+                expr = ("AT %s + %s" if forward else "RAT %s − %s") % (fmt4(cand["at" if forward else "rat"]),
+                                                                       fmt4(cand["delay"]))
+                self._text(cv, P(34), y + P(17), expr, "mono", 10, False, "faint")
+                y += P(44)
+        cv.configure(scrollregion=(0, 0, w, y + P(20)))
+
+    def _values_card(self, info, y, blank=False):
+        """AT / RAT / slew, slacks, load; `blank`: None is drawn empty (R41: not reached)."""
+        _num = (lambda v: "" if v is None else fmt4(v)) if blank else globals()["_num"]
         P = self.px
         cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
         y = self._section(cv, y, "timing", w)
