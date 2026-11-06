@@ -60,13 +60,20 @@ It writes three raw files into `OUT_DIR`:
   `name kind at_max_r at_max_f at_min_r at_min_f slack_max_r slack_max_f
   slack_min_r slack_min_f slew_max_r slew_max_f slew_min_r slew_min_f`, one
   row per top-level port (`kind = port`, through its top-level pin) and per
-  instance pin (`kind = pin`), from `get_property` (`arrival_*`, `slack_*`,
-  `slew_*`). OpenSTA's text for an undefined or infinite value is kept as is.
+  instance pin (`kind = pin`; pins with direction `internal`, the Liberty
+  `ff` nodes `IQ` / `IQN`, are skipped), from `get_property` (`arrival_*`,
+  `slack_*`, `slew_*`). OpenSTA's text for an undefined or infinite value is
+  kept as is.
 - `paths.txt` (raw): for every path end of `find_timing_paths -path_delay
   max` and `min` with `-group_path_count 1000000 -endpoint_path_count 1`, a
   line `END <endpoint> <setup|hold> <slack>` followed by one line
   `PT <pin> <edge> <arrival>` per point of `get_property $end points`, in path
-  order.
+  order. A register path's points start at Q; its launching CK pin (the pin
+  before Q in the path's pin chain `[$path pins]`) is written first as
+  `PT <CK pin> ^ NA`: the clock network before it (the clock port) is left out,
+  as the toy's clock net is not timed, and the edge is not reachable from Tcl,
+  so rise is written, which holds for `toy2.lib` (only `rising_edge` flops).
+- `units.txt`: `report_units`.
 - `report_max.txt`, `report_min.txt`: `report_checks -format
   full_clock_expanded -fields {input_pins slew capacitance fanout} -digits 6`
   over the same paths, for people only (no tool reads them).
@@ -140,5 +147,11 @@ Printed, in this order:
 
 ## Known gaps
 
-Recorded in `ref/README.md` as they are found (route, version, settings,
-model differences seen in the first runs).
+- The launching CK pin's edge in `paths.txt` is written as rise (see above).
+- `get_property` reports the graph's values at clock pins under an ideal
+  clock: CK pin slew 0 when the clock port has no input transition (the
+  `report_checks` text shows `set_clock_transition` there), CK pin arrival
+  without the ideal latency, a fall arrival at half the period, and values at
+  the clock port. They are written as OpenSTA gives them; R40 classifies them.
+- Route, version and the differences seen in the first runs are in
+  `ref/README.md`.

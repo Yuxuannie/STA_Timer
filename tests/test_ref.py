@@ -205,6 +205,25 @@ class CorrelateTests(unittest.TestCase):
         self.assertIn("same 5  mismatch 1  golden-only 1  actual-only 0", text)
 
 
+class S1423SnapshotTests(unittest.TestCase):
+    """R39 oracle rule, second branch: the eight designs do not correlate with OpenSTA
+    within 1 ps, so s1423 is checked byte for byte against the engine's own snapshot
+    (tests/snapshot/s1423/README.md), not against an oracle."""
+
+    def test_snapshot(self):
+        snap = os.path.join(ROOT, "tests", "snapshot", "s1423")
+        with tempfile.TemporaryDirectory() as tmp:
+            r = run([sys.executable, "-m", "sta_toy", "--lib", os.path.join(ROOT, "data", "toy2.lib"),
+                     "--verilog", os.path.join(ROOT, "data", "s1423.v"),
+                     "--sdc", os.path.join(ROOT, "data", "sdc", "s1423.sdc"), "--dump-tsv", tmp])
+            self.assertEqual(r.returncode, 0, r.stdout.decode())
+            d = run([sys.executable, os.path.join(ROOT, "tools", "diff_ref.py"), snap, tmp, "--tol", "0"])
+            self.assertEqual(d.returncode, 0, d.stdout.decode())
+            for fname in ("endpoints.tsv", "pins.tsv", "paths.txt"):
+                with open(os.path.join(snap, fname), "rb") as f1, open(os.path.join(tmp, fname), "rb") as f2:
+                    self.assertEqual(f2.read(), f1.read(), fname)
+
+
 def probe():
     if not os.path.exists(RUN_SH):
         return False

@@ -52,6 +52,8 @@ foreach port [get_ports *] {
   lappend lines [prop_row $name port [sta::find_pin $name] $props]
 }
 foreach pin [get_pins -hierarchical *] {
+  # Liberty ff internal nodes (IQ, IQN) are pins to OpenSTA but not netlist pins.
+  if {[get_property $pin direction] == "internal"} { continue }
   lappend lines [prop_row [get_full_name $pin] pin $pin $props]
 }
 write_file pins.tsv "[join $lines "\n"]\n"
@@ -63,7 +65,18 @@ foreach {delay check} {max setup min hold} {
   foreach pe $ends {
     set end [get_full_name [get_property $pe endpoint]]
     lappend lines "END $end $check [get_property $pe slack]"
-    foreach pt [get_property $pe points] {
+    # The points of a register path start at Q.  The path's pin chain goes on
+    # through the launching CK pin to the clock port; only the CK pin (the
+    # startpoint) is kept, the clock network is not part of a toy path.  Its
+    # edge is not exposed in Tcl: written as rise ("^"), true for toy2.lib,
+    # whose flops are all rising_edge (known gap otherwise).
+    set points [get_property $pe points]
+    set chain [lreverse [[$pe path] pins]]
+    set extra [expr {[llength $chain] - [llength $points]}]
+    if {$extra > 0} {
+      lappend lines "PT [get_full_name [lindex $chain [expr {$extra - 1}]]] ^ NA"
+    }
+    foreach pt $points {
       lappend lines "PT [get_full_name [get_property $pt pin]] [$pt edge] [get_property $pt arrival]"
     }
   }
@@ -76,5 +89,6 @@ foreach delay {max min} {
     -fields {input_pins slew capacitance fanout} -digits 6 \
     -group_path_count 1000000 -endpoint_path_count 1 > [out_path report_$delay.txt]
 }
-report_units > [out_path units.txt]
+with_output_to_variable units { report_units }
+write_file units.txt $units
 exit 0
