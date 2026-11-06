@@ -1,8 +1,9 @@
 # R40 smallest cases (OpenSTA 3.1.0 vs the engine)
 
 Each directory holds a netlist and SDC small enough to read by hand, for one class of
-difference found by `ref/run_all.sh` on the nine designs. All classes are `policy`
-(both tools consistent with their own rules); none is a toy bug or an adapter bug.
+difference found by `ref/run_all.sh` on the nine designs. P5-1a (CK-pin slew / arrival) is an
+`adapter` gap: OpenSTA's analysis uses the toy's values, its pin properties do not; the others
+are `policy` (both tools consistent with their own rules); none is a toy bug.
 Write-up, both tools' values and what would change: `REPORT_P5.md` §7.
 
 Run one case (from the repo root; `D` = case directory, `V` = its .v, `S` = its .sdc):
@@ -20,7 +21,8 @@ which is the evidence that no other class hides under those three
 
 | dir | class | §7 |
 |---|---|---|
-| ck_conventions | CK-pin and clock-port values under an ideal clock | P5-1 |
+| ck_conventions | CK-pin slew (P5-1a, adapter) and CK fall / clock-port values (P5-1b) under an ideal clock | P5-1 |
+| io_latency (FF1/CK row) | CK-pin arrival with latency | P5-1a |
 | io_latency | ideal clock latency on input / output delays | P5-2 |
 | po_uncertainty | clock uncertainty on output-port checks | P5-3 |
 | input_delay_facets | unset `set_input_delay` facets (`-max` only; none at all) | P5-4 |

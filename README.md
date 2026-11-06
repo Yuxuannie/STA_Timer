@@ -130,6 +130,7 @@ and hold paths. The numbers are the engine's, logged as it computed them.
     python3 tools/correlate.py GOLDEN_DIR ACTUAL_DIR [--tol 0.001] [--design V --lib L]
     python3 tools/bench2v.py data/bench/s1423.bench data/s1423.v --top s1423
 
-Every difference found is classified in `REPORT_P5.md` §4 and §7: all are policy differences
-(CK-pin conventions, clock latency on I/O delays, uncertainty on output-port checks, unset
-input-delay facets, tie-break), none a bug of the engine or the adapter.
+Every difference found is classified in `REPORT_P5.md` §4 and §7: CK-pin slew / arrival is an
+adapter gap (OpenSTA's analysis agrees, its pin properties do not); the rest are policy
+differences (CK fall / clock-port values, clock latency on I/O delays, uncertainty on output-port
+checks, unset input-delay facets, tie-break); none is an engine bug.

@@ -1,7 +1,7 @@
 """R40: the classification of the OpenSTA differences (REPORT_P5.md §7, ref/cases/).
 
 Skipped unless `ref/opensta/run.sh --probe` succeeds. Two kinds of test:
-- each policy case still shows its difference, with both tools' values as recorded in §7
+- each case still shows its difference (P5-1a is an adapter gap, the rest policy), with both tools' values as recorded in §7
   (so the classification is re-checked when either tool changes);
 - with the P5-2 .. P5-4 policies neutralised (ref/cases/aligned/), every cell of s27,
   ff2_swap and ff2_unc other than the CK-pin / clock-port conventions (P5-1) agrees

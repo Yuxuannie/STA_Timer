@@ -80,15 +80,15 @@ Paths (node sequences; `slack over tol` = same sequence, slack differs by more t
 | s1423 | 134 | 24 | 0 | 0 | 0 | `FAIL  tol 0.001  cells over/NA 454  rows only one side 0  paths bad 24` |
 
 Reading the table (classes from §7; every cell over 1 ps is accounted for):
-- ff2_default, ff2_setupviol, inv2, s1423: only P5-1 (CK-pin slew 0.05 vs 0, CK-pin / clock-port fall arrivals and clock-port values, the one-sided NA counts). All endpoints and all data pins agree.
-- ff2_holdviol, ff2_skew: P5-1 plus the CK-pin arrival with pin latency (3.5, 0.5): OpenSTA's pin `arrival` property excludes ideal latency, its checks include it (report: "clock network delay (ideal) 3.5"). Endpoints agree.
+- ff2_default, ff2_setupviol, inv2: only P5-1 (CK-pin slew 0.05 vs 0, CK-pin / clock-port fall arrivals and clock-port values, the one-sided NA counts). All endpoints and all data pins agree.
+- ff2_holdviol, ff2_skew: P5-1 (including P5-1a's CK-pin arrival with pin latency (3.5, 0.5): OpenSTA's pin `arrival` property excludes ideal latency, its checks include it (report: "clock network delay (ideal) 3.5")). Endpoints agree.
 - ff2_swap: P5-1 and P5-2 (clock-level latency 0.3 on the input delay of `x` and on the required time of `y`); the 3 path slacks over tol follow from it.
 - ff2_unc: P5-1 and P5-3 (`y`: setup RAT 7.5 vs 8.0, hold RAT −0.2 vs −0.5).
 - s27: P5-1, P5-2 (latency 0.2 on G0/G2/G3 arrivals and G17's RAT), P5-3 (G17 setup uncertainty), P5-4 (G1 without input delay and G3 with `-max` only are undefined for OpenSTA's early analysis, 0 for the toy: early values downstream differ by up to 2.5).
-- s1423: data columns within 0.0001 (6-digit → fmt4 rounding), including 24 out-of-grid load lookups above the table (`--check-timing`), so OpenSTA extrapolates linearly there as the toy does (ROADMAP D9, extrapolation part: agrees). 24 of 158 paths differ in sequence, all with equal slack (max |Δ| 0.0001): P5-5.
+- s1423: P5-1 and P5-5. Data columns within 0.0001 (6-digit → fmt4 rounding), including 24 out-of-grid load lookups above the table (`--check-timing`), so OpenSTA extrapolates linearly there as the toy does (ROADMAP D9, extrapolation part: agrees). 24 of 158 paths differ in sequence, all with equal slack (max |Δ| 0.0001): P5-5.
 - Evidence that nothing else hides: with P5-2..P5-4 neutralised in copies of the SDC files (`ref/cases/aligned/`), every non-CK cell of s27, ff2_swap and ff2_unc agrees within 1 ps and every path matches (`tests/test_ref_cases.py::test_aligned_designs_have_no_other_difference`).
 
-s1423: **snapshot**, not golden (`tests/snapshot/s1423/`, byte-exact test `test_ref.S1423SnapshotTests`). The brief's oracle rule needs the eight small designs within 1 ps on every column; P5-1 alone fails that on all eight. If the owner aligns P5-1 (or decides the adapter should report OpenSTA's clock-path values for CK pins), s1423 qualifies: its data columns already agree within 0.0001 and only P5-1 / P5-5 differ.
+s1423: **snapshot**, not golden (`tests/snapshot/s1423/`, byte-exact test `test_ref.S1423SnapshotTests`). The brief's oracle rule needs the eight small designs within 1 ps on every column; P5-1 alone fails that on all eight. s1423 qualifies only once P5-1 .. P5-4 are all resolved (ff2_swap, ff2_unc and s27 also fail through P5-2 .. P5-4), or if the owner restricts the rule to non-policy columns; s1423's own data columns already agree within 0.0001.
 
 Adapter defect found and fixed (588f756): `ref/opensta/run.sh` passed the absolute `run.tcl` path to `sta -exit`, which splits a path with a space; from the main checkout (`7-STA Timer`) every run failed and `test_ref.OpenStaTests` skipped instead of running. Not a numeric adapter issue.
 
@@ -161,7 +161,7 @@ Lead:
 4. The Tk smoke test on `s1423` (section 6) belongs to W1's `tests/test_viewer.py`, but `data/s1423.v` is W3's; W1 wrote it to skip while the files are absent. It runs after the merge (1.09 s).
 5. Section 8.3's protected-path command lists `data/sdc` as a whole, but W3's brief requires the new `data/sdc/s1423.sdc`. I read the protection as "the eight existing files" (section 1 says so). The command's only output is that new file; each of the eight is unchanged (`git diff --quiet viewer-v2..p5-ref -- data/sdc/<f>.sdc` for each). §10 has both commands.
 6. W1's request for a bundle node `fanout` field (bundle.py has no worker owner): added by the lead, additively, with a contract "Changes in P5" section and a test (b46e9df). The deletion of `docs/notes/p5_w1.md` landed in that same commit instead of the docs-fold commit (index state); no content effect.
-7. R40 classification: CK-pin arrival / slew under an ideal clock is classed `policy` (the brief's list names "CK-pin slew source"), not `adapter`: the adapter writes OpenSTA's pin properties as they are, and making it put the clock's transition or latency on CK pins would be the adapter computing the toy's model. Whether the adapter should take those values from OpenSTA's clock paths instead is part of decision P5-1.
+7. R40 classification of the CK-pin values. I first classed CK-pin slew / arrival as `policy`; the reviewer (§8.1) showed OpenSTA's own model agrees with the toy there (`report_checks` prints the 0.05 clock transition at the CK pin and "clock network delay (ideal) 3.5"; `report_dcalc -from FF2/CK -to FF2/Q` uses input_net_transition 0.05) and only the adapter's `get_property` read of the graph vertex differs. Reclassified: P5-1a `adapter` (CK slew, CK arrival with latency), P5-1b `policy` (CK fall arrival at T/2, clock-port values). The P5-1a fix is golden-neutral but not cheap (the Tcl path API exposes no slew and keeps the ideal latency as a separate term), so under step 7's 30-minute rule it is left open with its route (§7.1, §8.1).
 8. The `run.sh` path fix (588f756) is the only lead fix under R40: an `adapter` (infrastructure) defect. No `toy-bug` was found, so no engine code changed under R40.
 9. R40 evidence: besides the smallest cases I ran copies of three P2 SDC files with the P5-2..P5-4 policies neutralised (`ref/cases/aligned/`) — the P2 SDC files themselves are untouched (N34).
 
@@ -190,11 +190,9 @@ Reference (W3; DECISIONS.md R38–R39):
 ## 7. Decisions for you
 None of these is a toy bug: in each, both tools follow their own rules. Each changes P2 golden values if aligned, so I did not change anything (N30). Run all cases: `ref/cases/run_cases.sh`; re-check the classification: `python3 -m unittest tests.test_ref_cases` (skips without OpenSTA).
 
-1. **P5-1 · CK-pin and clock-port values under an ideal clock** (class `policy`; ROADMAP D11).
-   Case: `ref/cases/ck_conventions/` (`reg1.v`: one DFF, `ck_slew.sdc`: clock transition 0.05).
-   Toy: `FF1/CK` slew 0.0500 (r), arrival `L` (pin or clock latency), f columns NA, clock port all NA. OpenSTA (pin properties): slew 0.0000, arrival 0.0000 without the ideal latency (its checks still use it: "clock network delay (ideal) 3.5" in `ff2_holdviol`), f arrival T/2 = 5.0000, clock port carries the CK-pin values.
-   Contract: p2_semantics.md §5 (sources table). Effect: affects only CK-pin rows and the clock port; every endpoint value agrees.
-   If aligned: either the toy's §5 table changes (CK slew 0 in pins.tsv while delay calc keeps the clock transition — every P2 golden's CK rows change), or — cheaper and golden-neutral — the adapter takes CK-pin arrival and slew from OpenSTA's clock paths and writes NA for CK f columns and the clock port. My recommendation: keep the toy and change the adapter (decide that this is a reporting convention, not a semantic one); that would also make s1423 qualify as an OpenSTA golden.
+1. **P5-1 · CK-pin and clock-port values under an ideal clock** (ROADMAP D11). Effect: only CK-pin rows and the clock port; every endpoint value agrees. Contract: p2_semantics.md §5 (sources table).
+   - **P5-1a · CK-pin slew and arrival** (class `adapter`, not fixed; §6.7, §8.1). Cases: `ref/cases/ck_conventions/` (clock transition 0.05: `FF1/CK` slew toy 0.0500, OpenSTA pin property 0.0000) and `ref/cases/io_latency/` (clock latency 0.3: `FF1/CK` at_late_r toy 0.3000, OpenSTA 0.0000). OpenSTA's analysis uses the toy's values (report_checks shows slew 0.05 at the CK pin and "clock network delay (ideal)"; report_dcalc shows input_net_transition 0.05 on CK→Q); only its graph-vertex properties, which `run.tcl` reads, hold 0. Fix route (golden-neutral): in `run.tcl`, CK-pin slew from `report_dcalc -from <CK> -to <Q>` (input_net_transition), CK-pin arrival = clock edge + the path end's `target_clk_delay` (capture) / `source_clk_latency` (launch); then `test_ref_cases.test_p5_1_ck_pin_slew` changes to assert agreement. Not a decision for you unless you prefer to keep the adapter a pure property dump.
+   - **P5-1b · CK-pin fall arrival and clock-port values** (class `policy`). Case: `ref/cases/ck_conventions/`. Toy: `FF1/CK` f columns NA, clock port `clk` all NA (§5: CK pins defined for r only; the clock net is not in the graph). OpenSTA: f arrival T/2 = 5.0000 on CK pins and the clock port, the clock port carries the CK-pin values. If aligned: §5's table defines f at T/2 and clock-port rows; every P2 golden's CK and clock rows change. My recommendation: keep the toy (rising-edge flops never use the f values) and have the adapter write NA there, as a recorded reporting convention.
 2. **P5-2 · Ideal clock latency on input and output delays** (class `policy`).
    Case: `ref/cases/io_latency/` (`latency.sdc`: `set_clock_latency 0.3 [get_clocks clk]`).
    Toy: `d` arrival 0.5000; `q` setup RAT 8.0000, hold RAT −2.0000. OpenSTA: `d` arrival 0.8000 (input delay + latency); `q` setup RAT 8.3000, hold RAT −1.7000 (output delay relative to the latency-shifted edge). FF1/D hold slack 0.4 vs 0.1.
@@ -209,14 +207,26 @@ None of these is a toy bug: in each, both tools follow their own rules. Each cha
    Cases: `ref/cases/input_delay_facets/max_only.sdc` (`-max 2.0` only) and `no_input_delay.sdc` (none).
    Toy: a facet never set reads 0 — `d` early arrival 0.0000, FF1/D hold slack −0.1000; with no input delay at all `d` is still timed against the clock (FF1/D setup slack 9.7000, hold −0.1000). OpenSTA: an unset `-min` facet leaves the early arrival undefined (FF1/D has no hold check: NA); a port with no input delay is unclocked, so paths from it are unconstrained (FF1/D not an endpoint).
    Contract: p2_semantics.md §5 ("A facet never set is 0"), sdc_subset.md "Facets and overriding". Seen in s27 (G1, G3: early values downstream differ by up to 2.5).
-   If aligned: unset facets become NA instead of 0 (and an input without any input delay starts no constrained path); s27's goldens change, and `--check-timing` already lists such ports. Recommendation: align, since 0 silently makes hold optimistic or pessimistic.
+   If aligned: unset facets become NA instead of 0 (and an input without any input delay starts no constrained path); s27's goldens change. `--check-timing` lists G1 (no input delay); a `-max`-only port such as G3 is not listed (check_timing.md lists only ports with neither facet) — whether to add a partial-facet line is a further question for you. Recommendation: align, since 0 silently makes hold optimistic or pessimistic.
 5. **P5-5 · Tie-break between equal candidates** (class `policy`).
    Case: `ref/cases/tie_break/` (`tie2.v`: inputs `a`, `b` with equal delay into one NAND2).
    Toy: `FF1/D setup 7.2000 : a(f) -> U1/A(f) -> ...` (first by pin name, p2_semantics.md §6 / §11). OpenSTA: same slack, `b(f) -> U1/B(f) -> ...`. Seen in s1423 (24 of 158 paths, all equal slack).
    If aligned: the tie rule would follow OpenSTA's internal order, which is not documented and may change between versions. Recommendation: keep the toy's rule and teach `correlate.py` to count an equal-slack sequence difference as a tie, not a mismatch.
 
 ## 8. Reviewer findings
-(pending)
+Read-only reviewer on p5-ref @ ed70585 (worktree `../p5-wt/rev`, clean afterwards). Its counts: 214 tests OK, 6 skipped (11.3 s) / 214 OK, 1 skipped (195.9 s); OpenSTA probe 3.1.0 444cfc7. Item 1: the §8.3 command prints only `A data/sdc/s1423.sdc`; the eight P2 SDC files are unchanged — reading of §6.5 accepted. Item 3 (scope) and N30: no finding (backward `_delay_only` uses the same table and arguments as `arc_delay`; the forward winner loop is equivalent; label layout, bundle `fanout` and the run.sh fix change no timing value). Item 2: every TRACE name R32–R40 exists; three rules broken and re-run — R35 out-of-grid count over backward (4 failures: guarded), R33 near-critical threshold (no failure: finding 2), R37 `*_transition` axis conversion (3 failures: guarded).
+
+1. defect · REPORT_P5.md §6.7, §7.1 · CK-pin slew / latency is `adapter`, not `policy`: OpenSTA's analysis uses the toy's values, only the vertex properties differ. **Accepted, reclassified (P5-1a / P5-1b); fix open** — golden-neutral but over the 30-minute bar (no slew in the Tcl path API; ideal latency is a separate path-end term); route in §7.1.
+2. defect · sta_toy/viewer/app.py:1277 · near-critical colouring had no test that fails without it. **Fixed**: `model.is_near(margin, period)` decides it, the app calls it, `test_viewer.ViewModelTests.test_near_critical` asserts 0.0999 → True, 0.1000 → False, 0.05 → True at period 10; viewer_p4.md states that the threshold itself is not near-critical.
+3. doc · REPORT §4 / §7.1 · "aligning P5-1 makes s1423 qualify" contradicted the oracle rule. **Fixed** (needs P5-1 .. P5-4, or a rule restricted to non-policy columns).
+4. doc · REPORT §7.4 · "`--check-timing` already lists such ports" is false for `-max`-only facets (G3, G17). **Fixed**; listing partial facets added as an open question in §7.4.
+5. doc · REPORT §4 · s1423 listed under "only P5-1" though it has P5-5. **Fixed.**
+6. doc · REPORT §7.1 · the CK-arrival-without-latency claim had no smallest case. **Fixed**: P5-1a cites `ref/cases/io_latency/` `FF1/CK` at_late_r 0.3000 vs 0.0000.
+7. doc · docs/contracts/trace.md · out-of-cone candidates of a kept entry: filtered or not was open. **Fixed**: trace.md says they are kept; `test_trace.TraceGoldenTests.test_candidates_outside_the_cone_are_kept` checks `--trace y` (FF2/Q lists FF1/D(r)).
+8. doc · docs/contracts/bundle_v1.md · `fanout` "null when the pin drives no net" vs the clock port. **Fixed**: "no timed net arcs"; the clock port is never a cone node (its net is not in the graph), `test_bundle.ValueTests.test_node_fields` checks `_node(clk)` is null.
+9. doc · REPORT §2 · intermediate counts and the 3.6 s had no command. **Fixed** in §10 (per-commit checkouts, `time ref/run_all.sh`).
+10. doc (process) · R39's reference.md landed in the same commit as its code (66632d7), and reference.md said test_ref.py skips as a whole. **Wording fixed** (only `OpenStaTests` skips); the commit order stays as recorded (history is not rewritten).
+11. (R43, in progress at review time) DECISIONS "Interventions" entry and TRACE rows R41–R43: done in the finish step.
 
 ## 9. Not done
 (pending)
@@ -224,7 +234,9 @@ None of these is a toy bug: in each, both tools follow their own rules. Each cha
 ## 10. How to reproduce every number above
 From the repo root on `p5-ref` (OpenSTA at `~/tools/opensta/build/sta`, else set `STA_BIN`):
 
-    # §2 tests
+    # §2 tests (intermediate counts: check out the commit, run both interpreters, return to p5-ref)
+    #   tests / skipped python3 / skipped python3.12: viewer-v2 155/4/1 · bbb685d 159/4/1 · 780231f (p5-engine merge) 183/4/1 · f4a8240 (p5-viewer merge) 194/6/2
+    for c in viewer-v2 bbb685d 780231f f4a8240; do git checkout -q $c && /usr/bin/python3 -m unittest discover -s tests 2>&1 | tail -1 && ~/.local/bin/python3.12 -m unittest discover -s tests 2>&1 | tail -1; done; git checkout -q p5-ref
     /usr/bin/python3 -m unittest discover -s tests                 # 214, 6 skipped
     ~/.local/bin/python3.12 -m unittest discover -s tests          # 214, 1 skipped (≈190 s)
     git checkout viewer-v2 && /usr/bin/python3 -m unittest discover -s tests && git checkout p5-ref   # 155, 4 skipped
@@ -236,7 +248,7 @@ From the repo root on `p5-ref` (OpenSTA at `~/tools/opensta/build/sta`, else set
     ~/.local/bin/python3.12 -m sta_toy.viewer --lib data/toy2.lib --verilog data/s27.v --sdc data/sdc/s27.sdc --scale 1.25
     # §4 correlation (tables built from ref/results/<d>/correlate.txt)
     ref/opensta/run.sh --probe
-    ref/run_all.sh
+    time ref/run_all.sh                                        # 3.6 s
     ref/cases/run_cases.sh
     python3 -m unittest -v tests.test_ref_cases tests.test_ref
     # §5 engine

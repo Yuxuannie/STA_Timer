@@ -138,8 +138,8 @@ Printed, in this order:
 
 ## Test rules
 
-- `tests/test_ref.py` is skipped unless `ref/opensta/run.sh --probe` exits 0.
-  It checks that `to_golden.py` output for `ff2_default` is well formed and
+- `tests/test_ref.py`: `OpenStaTests` is skipped unless `ref/opensta/run.sh --probe`
+  exits 0 (the other classes always run). It checks that `to_golden.py` output for `ff2_default` is well formed and
   that its pin and endpoint sets equal the engine's. Numeric agreement is not
   asserted here (R40).
 - `to_golden.py` and `correlate.py` are also tested without OpenSTA, on
