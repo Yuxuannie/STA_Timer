@@ -1,7 +1,10 @@
 """Liberty: a generic parser into a tree of groups and attributes (R1),
 and the accessors that answer the stage-1 queries on that tree (R2)."""
 
-from sta_toy import StaError, read_file
+import re
+from fractions import Fraction
+
+from sta_toy import P2Error, StaError, read_file
 
 _PUNCT = "(){}:;,"
 
@@ -38,7 +41,7 @@ def parse_file(path):
 
 def parse(text, filename):
     """Parse Liberty text into its single top-level group."""
-    p = _Parser(_tokenize(text, filename), filename)
+    p = _Parser(list(_tokenize(text, filename)), filename)
     holder = Group("", [], 0)
     first = p.peek()
     p.statement(holder)
@@ -49,73 +52,51 @@ def parse(text, filename):
     return holder.groups[0]
 
 
-def _continuation_end(text, i):
-    """If text[i] is a backslash ending its line, return the index after the newline."""
-    j = i + 1
-    while j < len(text) and text[j] in " \t\r":
-        j += 1
-    if j < len(text) and text[j] == "\n":
-        return j + 1
-    return None
+_TOKEN = re.compile(r'(?P<ws>\s+)|(?P<word>(?:[^\s(){}:;,"\\/]|/(?!\*))+)|(?P<punct>[(){}:;,])'
+                    r'|(?P<cmt>/\*)|(?P<str>")|(?P<bs>\\)')
+_CONT = re.compile(r"\\[ \t\r]*\n")
 
 
 def _tokenize(text, filename):
-    """Return (kind, value, line) tuples; kind is a punctuation char, 'str', 'word' or 'eof'."""
-    tokens = []
+    """Yield (kind, value, line) tuples; kind is a punctuation char, 'str', 'word' or 'eof'.
+    One regex match per token (R42); the output, errors included, is that of the character
+    loop it replaced (kept as tests/test_tokenizer.py `_tokenize_reference`)."""
     i, line, n = 0, 1, len(text)
+    match = _TOKEN.match
     while i < n:
-        c = text[i]
-        if c == "\n":
-            line += 1
-            i += 1
-        elif c.isspace():
-            i += 1
-        elif c == "\\":
-            j = _continuation_end(text, i)
-            if j is None:
-                raise StaError(filename, line, "unexpected '\\'")
-            line += 1
-            i = j
-        elif text.startswith("/*", i):
+        m = match(text, i)
+        kind = m.lastgroup
+        if kind == "ws":
+            line += m.group().count("\n")
+        elif kind == "word":
+            yield ("word", m.group(), line)
+        elif kind == "punct":
+            yield (m.group(), m.group(), line)
+        elif kind == "cmt":
             end = text.find("*/", i + 2)
             if end < 0:
                 raise StaError(filename, line, "unterminated comment")
             line += text.count("\n", i, end)
             i = end + 2
-        elif c == '"':
-            start = line
-            chars = []
-            i += 1
-            while True:
-                if i >= n:
-                    raise StaError(filename, start, "unterminated string")
-                c = text[i]
-                if c == '"':
-                    i += 1
-                    break
-                if c == "\\":
-                    j = _continuation_end(text, i)
-                    if j is not None:
-                        line += 1
-                        i = j
-                        continue
-                if c == "\n":
-                    line += 1
-                chars.append(c)
-                i += 1
-            tokens.append(("str", "".join(chars), start))
-        elif c in _PUNCT:
-            tokens.append((c, c, line))
-            i += 1
+            continue
+        elif kind == "str":
+            end = text.find('"', i + 1)
+            if end < 0:
+                raise StaError(filename, line, "unterminated string")
+            body = text[i + 1:end]
+            yield ("str", _CONT.sub("", body), line)       # a backslash-newline inside is dropped
+            line += body.count("\n")
+            i = end + 1
+            continue
         else:
-            j = i
-            while (j < n and not text[j].isspace() and text[j] not in _PUNCT + '"\\'
-                   and not text.startswith("/*", j)):
-                j += 1
-            tokens.append(("word", text[i:j], line))
-            i = j
-    tokens.append(("eof", "", line))
-    return tokens
+            c = _CONT.match(text, i)
+            if c is None:
+                raise StaError(filename, line, "unexpected '\\'")
+            line += 1
+            i = c.end()
+            continue
+        i = m.end()
+    yield ("eof", "", line)
 
 
 def _show(tok):
@@ -277,11 +258,64 @@ class Cell:
 
 
 class Library:
+    """`time_unit` is the attribute's text ("1ns"), `cap_unit` (value, unit) or None when
+    the library does not declare it (R37: an error at design load, not here)."""
+
     def __init__(self, name, cap_unit, cells, time_unit=None):
         self.name = name
         self.cap_unit = cap_unit
         self.cells = cells
         self.time_unit = time_unit
+
+
+# R37 (cli_p5.md "Library units"): unit names as exact powers of ten (of s and F).
+TIME_UNITS = {"fs": -15, "ps": -12, "ns": -9, "us": -6, "ms": -3, "s": 0}
+CAP_UNITS = {"ff": -15, "pf": -12, "nf": -9, "uf": -6, "mf": -3, "f": 0}
+
+
+def units(lib, path):
+    """(time unit in s, cap unit in F) as exact Fractions; a missing or unknown unit is
+    the P2Error of cli_p5.md."""
+
+    def error(message):
+        raise P2Error(path, None, "library %s: %s" % (lib.name, message))
+
+    if lib.time_unit is None:
+        error("missing time_unit")
+    if lib.cap_unit is None:
+        error("missing capacitive_load_unit")
+    m = re.match(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z]+)\s*$", lib.time_unit)
+    if not m or m.group(2).lower() not in TIME_UNITS:
+        error("unknown time_unit %s" % lib.time_unit)
+    time = Fraction(m.group(1)) * Fraction(10) ** TIME_UNITS[m.group(2).lower()]
+    value, unit = lib.cap_unit
+    if unit.lower() not in CAP_UNITS:
+        error("unknown capacitive_load_unit %s" % unit)
+    return time, Fraction(repr(value)) * Fraction(10) ** CAP_UNITS[unit.lower()]
+
+
+def _scaled(values, factor):
+    return [v * factor.numerator / factor.denominator for v in values]
+
+
+def convert(lib, time_factor, cap_factor):
+    """Scale the built cells of `lib` in place: times by time_factor, capacitances by
+    cap_factor (cli_p5.md). The generic tree is not touched; shared template index lists
+    are replaced, never modified."""
+    for cell in lib.cells.values():
+        for pin in cell.pins:
+            for name in ("capacitance", "rise_capacitance", "fall_capacitance"):
+                if getattr(pin, name) is not None:
+                    setattr(pin, name, _scaled([getattr(pin, name)], cap_factor)[0])
+            for timing in pin.timings:
+                for table in timing.tables.values():
+                    table.values = [_scaled(row, time_factor) for row in table.values]
+                    for k, var in enumerate(table.variables):
+                        attr = "index_%d" % (k + 1)
+                        if var.endswith("_transition"):
+                            setattr(table, attr, _scaled(getattr(table, attr), time_factor))
+                        elif var.endswith("_capacitance"):
+                            setattr(table, attr, _scaled(getattr(table, attr), cap_factor))
 
 
 def load(path):
@@ -333,10 +367,12 @@ class _Builder:
     def library(self, root):
         name = self.names(root)[0]
         unit = self.first(root, "capacitive_load_unit")
-        if unit is None or len(unit.values) != 2:
-            self.error(unit or root, "library %s: capacitive_load_unit must be (<value>, <unit>)"
-                       % name)
-        cap_unit = (self.numbers(unit, unit.values[0], "library " + name)[0], unit.values[1])
+        cap_unit = None
+        if unit is not None:
+            if len(unit.values) != 2:
+                self.error(unit, "library %s: capacitive_load_unit must be (<value>, <unit>)"
+                           % name)
+            cap_unit = (self.numbers(unit, unit.values[0], "library " + name)[0], unit.values[1])
         templates = {}
         for g in root.find_groups("lu_table_template"):
             tname = self.names(g)[0]

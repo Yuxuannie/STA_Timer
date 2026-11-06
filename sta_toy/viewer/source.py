@@ -12,13 +12,17 @@ which one they have:
                           the binding one first
   driver(pin)          the pin driving an input pin over a net, or None
   arrival(pin, check)  (AT, rf) of the check's mode, worst transition (ties to r), or None
-  pin(name)            {"pin", "kind", "cell", "at", "rat", "slew", "slack", "load"} or None
+  pin(name)            {"pin", "kind", "cell", "at", "rat", "slew", "slack", "load", "fanout"} or None
   arcs(inst)           [{"from", "to", "kind", "delay": {mode: {pair: value}}}]
+  arc_lookup(from_pin, to_pin, check, rf_from, rf_to)
+                       {"delay", "slew"}: lookup.lookup_detail of the arc's tables, or None
+  check_lookup(pin, check, rf)   lookup.lookup_detail of a D pin's constraint table, or None
+  trace(endpoint)      the R36 trace entries of the endpoint (trace.md), or None
 """
 
 import json
 
-from sta_toy import P2Error, design, paths, timer
+from sta_toy import P2Error, bundle, design, lookup, paths, timer, trace
 
 SCHEMA = "sta_toy.bundle/1"
 MODE = {"setup": "late", "hold": "early"}
@@ -49,11 +53,12 @@ class EngineSource:
     """Runs the engine once on a design."""
 
     mode = "engine"
-    note = None
 
     def __init__(self, lib_paths, verilog_path, sdc_path):
         lib, netlist, linked = design.load(lib_paths, verilog_path)
         self.g = design.timed(lib, netlist, linked, sdc_path)
+        self._design = (lib, netlist, linked, sdc_path)
+        self._traces, self._log = {}, None
         self.design_name = netlist.name
         self.clock_name = self.g.sdc.clock_name
         self.period = self.g.sdc.period
@@ -129,9 +134,10 @@ class EngineSource:
             found = [timer.slack(n, check, rf) for rf in ("r", "f")]
             found = [s for s in found if s is not None]
             slack[check] = min(found) if found else None
-        drives = any(a.kind == "net" for a in n.fanout)
+        nets = sum(1 for a in n.fanout if a.kind == "net")
         return {"pin": n.name, "kind": n.kind, "cell": n.cell, "at": n.at, "rat": n.rat,
-                "slew": n.slew, "slack": slack, "load": n.load if drives else None}
+                "slew": n.slew, "slack": slack, "load": n.load if nets else None,
+                "fanout": nets or None}
 
     def arcs(self, inst):
         out = []
@@ -150,44 +156,50 @@ class EngineSource:
                 out.append({"from": a.src.name, "to": n.name, "kind": a.kind, "delay": delay})
         return out
 
+    def arc_lookup(self, from_pin, to_pin, check, rf_from, rf_to):
+        """The delay and transition lookups of the cell / ckq arc from_pin -> to_pin at the
+        arguments timer.arc_delay uses; of several such arcs, the one whose delay gives the
+        arrival (late largest, early smallest; ties to the first)."""
+        node, mode = self.g.by_name[to_pin], MODE[check]
+        found = []
+        for a in node.fanin:
+            if a.src.name == from_pin and a.tables is not None and (rf_from, rf_to) in a.pairs \
+                    and a.src.slew[mode][rf_from] is not None:
+                delay, transition = a.tables[rf_to]
+                args = {"input_net_transition": a.src.slew[mode][rf_from],
+                        "total_output_net_capacitance": node.load}
+                found.append({"delay": lookup.lookup_detail(delay, args),
+                              "slew": lookup.lookup_detail(transition, args)})
+        if not found:
+            return None
+        best = (max if mode == "late" else min)(d["delay"]["value"] for d in found)
+        return [d for d in found if d["delay"]["value"] == best][0]
 
-def _infer_instances(data):
-    """Instances of a bundle written before "instances" existed, rebuilt from its nodes, edges
-    and path points: only the pins it mentions, inputs then outputs, each by name."""
-    cell, direction, clock = {}, {}, {}
-    for n in data["nodes"]:
-        if "/" in n["pin"]:
-            cell[n["pin"].split("/")[0]] = n["cell"]
-            if n["kind"] in ("CK", "D"):
-                direction[n["pin"]] = "input"
-                clock[n["pin"]] = n["kind"] == "CK"
-    for e in data["edges"]:
-        if e["kind"] == "net":
-            direction[e["v"]] = "input"
-            direction[e["u"]] = "output"
-        else:
-            direction[e["u"]] = "input"
-            direction[e["v"]] = "input" if e["kind"] == "check" else "output"
-            if e["kind"] in ("ckq", "check"):
-                clock[e["u"]] = True
-    for p in data["paths"]:
-        for q in p["points"]:
-            if q["cell"] is None:
-                continue
-            cell[q["pin"].split("/")[0]] = q["cell"]
-            direction[q["pin"]] = "output" if q["arc"] in ("cell", "ckq") else "input"
-            if q["arc"] == "start":
-                clock[q["pin"]] = True
-    out = {}
-    for pin, d in direction.items():
-        if "/" not in pin:
-            continue
-        inst, name = pin.split("/")
-        out.setdefault(inst, {"cell": cell.get(inst), "pins": []})["pins"].append(
-            {"name": name, "direction": d, "clock": clock.get(pin, False)})
-    for info in out.values():
-        info["pins"].sort(key=lambda p: (p["direction"] != "input", p["name"]))
-    return out
+    def trace(self, endpoint):
+        """R41: the entries `trace.format_trace` prints for `endpoint`, in log order. The
+        design is timed once more with a log (the first time a trace is asked for)."""
+        if endpoint not in self._traces:
+            if self._log is None:
+                self._log = []
+                self._trace_g = design.timed(*self._design, log=self._log)
+            log = list(self._log)
+            e = trace.collect(self._trace_g, endpoint, log)
+            cone = {n.name for n in bundle._cone(e, float("inf"))}
+            keep = dict((phase, endpoint_only) for phase, _, endpoint_only in trace.SECTIONS)
+            self._traces[endpoint] = [x for x in log
+                                      if (x["pin"] == endpoint if keep[x["phase"]] else x["pin"] in cone)]
+        return self._traces[endpoint]
+
+    def check_lookup(self, pin, check, rf):
+        """The setup / hold constraint lookup of D pin `pin` at (D slew, CK slew), as
+        timer.check computes it (a later group of the same kind wins)."""
+        node, mode = self.g.by_name[pin], MODE[check]
+        found = None
+        for c in node.checks:
+            if c.kind == check and node.slew[mode][rf] is not None and c.ck.at[mode]["r"] is not None:
+                found = lookup.lookup_detail(c.tables[rf], {"constrained_pin_transition": node.slew[mode][rf],
+                                                           "related_pin_transition": c.ck.slew[mode]["r"]})
+        return found
 
 
 class BundleSource:
@@ -207,11 +219,8 @@ class BundleSource:
             raise P2Error(None, None, "%s is not JSON" % path)
         if not isinstance(data, dict) or data.get("schema") != SCHEMA:
             raise P2Error(None, None, "%s is not a %s bundle" % (path, SCHEMA))
-        self.note = None
         if "instances" not in data:
-            data["instances"] = _infer_instances(data)
-            self.note = ("This bundle was written before cells were stored: cells show only the "
-                         "pins it mentions. Write it again with --bundle for full cells.")
+            raise P2Error(None, None, "bundle has no instances: write it again with --bundle")
         self.data = data
         self.design_name = data["endpoint"]
         self.clock_name = data["clock"]["name"]
@@ -274,9 +283,19 @@ class BundleSource:
         if n is None:
             return None
         return {"pin": n["pin"], "kind": n["kind"], "cell": n["cell"], "at": n["at"],
-                "rat": n["rat"], "slew": n["slew"], "slack": n["slack"], "load": n["cap"]}
+                "rat": n["rat"], "slew": n["slew"], "slack": n["slack"], "load": n["cap"],
+                "fanout": n.get("fanout")}      # only if the bundle carries it (its edges stop at the cone)
 
     def arcs(self, inst):
         return [{"from": e["u"], "to": e["v"], "kind": e["kind"], "delay": e["delay"]}
                 for e in self.data["edges"]
                 if e["kind"] in ("cell", "ckq") and e["v"].split("/")[0] == inst and "/" in e["v"]]
+
+    def arc_lookup(self, from_pin, to_pin, check, rf_from, rf_to):
+        return None                     # a bundle holds delays, not tables
+
+    def check_lookup(self, pin, check, rf):
+        return None
+
+    def trace(self, endpoint):
+        return None                     # R41: engine mode only

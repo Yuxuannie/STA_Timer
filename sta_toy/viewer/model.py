@@ -1,7 +1,8 @@
 """Viewer model without Tk (R28, viewer_p4.md): the endpoint list and slack histogram, a
-path's summary, formula terms, three-section path table, stage profile and waveform, its
-stages pin to pin, and the path schematic with cells drawn as gates on a grid."""
+path's summary, formula terms, three-section path table and waveform, its stages pin to
+pin, and the path schematic with cells drawn as gates on a grid."""
 
+import math
 import re
 
 from sta_toy.tsv import fmt4
@@ -383,26 +384,12 @@ def histogram(values, bins=12):
     return out
 
 
-def profile(path):
-    """One bar per path stage on the time axis: the launch (clock latency or input delay)
-    and every cell arc, each {label, kind, t0, t1, delay, index}."""
-    pts = path["points"]
-    s = summary(path)
-    bars = [{"label": "clock latency" if s["launch_latency"] is not None else "input delay",
-             "kind": "launch", "t0": 0.0, "t1": pts[0]["at"], "delay": pts[0]["at"], "index": 0}]
-    for k, q in enumerate(pts):
-        if q["arc"] in ("cell", "ckq"):
-            bars.append({"label": "%s %s %s→%s" % (q["pin"].split("/")[0], q["cell"],
-                                                   _short(pts[k - 1]["pin"]), _short(q["pin"])),
-                         "kind": q["arc"], "t0": pts[k - 1]["at"], "t1": q["at"],
-                         "delay": q["incr"], "index": k})
-    return bars
-
-
 def path_table(path, source):
     """The path in three sections (Vivado style): source clock path, data path, destination
-    clock path. Data rows carry the pin's AT, RAT and slack of the check's mode, its load and
-    slews (walkthrough §10); `index` is the path point. Clock rows have no pin values."""
+    clock path. Data rows carry the pin's AT, RAT and slack of the check's mode, its load,
+    fanout and slews (walkthrough §10); `index` is the path point. Clock rows have no pin values.
+    `largest` marks the data rows of kind cell / ckq whose incr is the largest one (within
+    1e-9; ties: all)."""
     pts, check = path["points"], path["check"]
     mode = MODE[check]
     s = summary(path)
@@ -430,9 +417,13 @@ def path_table(path, source):
             arc = "%s→%s" % (_short(pts[k - 1]["pin"]), _short(q["pin"]))
         data.append({"label": q["pin"], "cell": q["cell"], "arc": arc, "kind": q["arc"],
                      "rf": q["rf"] if q["arc"] not in ("cell", "ckq") else "%s→%s" % (pts[k - 1]["rf"], q["rf"]),
-                     "load": q["cap"], "slew_in": pts[k - 1]["slew"] if q["arc"] in ("cell", "ckq") else None,
+                     "load": q["cap"], "fanout": info.get("fanout"),
+                     "slew_in": pts[k - 1]["slew"] if q["arc"] in ("cell", "ckq") else None,
                      "slew": q["slew"], "incr": q["incr"], "value": q["at"], "rat": rat, "slack": slack,
                      "index": k})
+    cells = [r["incr"] for r in data if r["kind"] in ("cell", "ckq")]
+    for r in data:
+        r["largest"] = r["kind"] in ("cell", "ckq") and abs(r["incr"] - max(cells)) <= 1e-9
     dst = []
     for r in capture_rows(path)[:-3]:
         dst.append({"label": r["label"], "incr": r["delta"], "value": r["value"]})
@@ -444,12 +435,63 @@ def path_table(path, source):
             {"title": "Destination clock path" if cap["pin"] is not None else "Output", "rows": dst}]
 
 
-def waveform(setup, hold, period, check="setup"):
+def lookups(path, source, k):
+    """The table lookups behind path point k as [(label, lookup.lookup_detail dict)]: delay
+    and output slew of a cell / ckq arc, t_setup / t_hold of the capture D pin; [] for other
+    points and when the source has no tables (a bundle)."""
+    pts, check = path["points"], path["check"]
+    q = pts[k]
+    if q["arc"] in ("cell", "ckq"):
+        d = source.arc_lookup(pts[k - 1]["pin"], q["pin"], check, pts[k - 1]["rf"], q["rf"])
+        return [("delay", d["delay"]), ("output slew", d["slew"])] if d else []
+    if k == len(pts) - 1 and path["capture"]["pin"] is not None:
+        d = source.check_lookup(q["pin"], check, q["rf"])
+        return [("t_" + check, d)] if d else []
+    return []
+
+
+def near_critical(period):
+    """The merge margin under which a losing candidate is near-critical: 1 % of the period."""
+    return 0.01 * period
+
+
+def is_near(margin, period):
+    """A losing candidate is near-critical when its margin is under near_critical(period) by
+    more than 1e-9 (a margin equal to the threshold is not)."""
+    return margin < near_critical(period) - 1e-9
+
+
+def _edge_labels(row, span, lines, text_width, units):
+    """[(t, text, anchor)] for every rising edge t of a clock row inside the span: right of
+    the edge (anchor w) or else left of it (anchor e, not before the span start); dropped if
+    both would overlap an earlier label of the row or a mark line strictly inside."""
+    t0, t1 = span
+    period = row["period"]
+    t = row["edges"][0] - period * math.floor((row["edges"][0] - t0) / period)
+    labels, taken = [], []
+    while t <= t1:
+        text = fmt4(t)
+        w = text_width(text) * units if text_width else 0.0
+        for anchor, a, b in (("w", t, t + w), ("e", t - w, t)):
+            if a < t0 or any(a < m < b for m in lines) or any(a < y and x < b for x, y in taken):
+                continue
+            labels.append((t, text, anchor))
+            taken.append((a, b))
+            break
+        t += period
+    return labels
+
+
+def waveform(setup, hold, period, check="setup", text_width=None, axis_px=None):
     """Walkthrough §6 for one endpoint, in time units: the launch and capture clock edges, the
     data at the endpoint changing between the earliest (hold path) and latest (setup path)
     arrival, the setup and hold windows, and both slacks. `setup` / `hold` are path objects
     (either may be None); the launch row follows the path of `check` (the two worst paths may
-    start at different points). Returns {"span": (t0, t1), "rows": [...], "marks": [...]}."""
+    start at different points). Each clock row's `labels` name its rising edges (see
+    _edge_labels); `text_width(text)` is a label's width in pixels, `axis_px` the span's
+    width in pixels (without them labels have width 0); the dashed mark lines at each
+    required time cross the capture row only. Returns {"span": (t0, t1), "rows": [...],
+    "marks": [...]}."""
     any_path = (setup if check == "setup" else hold) or setup or hold
     s_any = summary(any_path)
     launch_l = s_any["launch_latency"]
@@ -476,4 +518,119 @@ def waveform(setup, hold, period, check="setup"):
         times += list(m["window"]) + [m["required"], m["arrival"]]
     span = (min(times + [0.0]), max(times))
     pad = (span[1] - span[0]) * 0.04 or 1.0
-    return {"span": (span[0] - pad, span[1] + pad), "rows": rows, "marks": marks}
+    span = (span[0] - pad, span[1] + pad)
+    units = (span[1] - span[0]) / float(axis_px) if axis_px else 0.0
+    for row, lines in zip(rows[:2], ([], [m["required"] for m in marks])):
+        row["labels"] = _edge_labels(row, span, lines, text_width, units)
+    return {"span": span, "rows": rows, "marks": marks}
+
+
+# ------------------------------------------------------------------------- R41 trace replay
+
+class Replay:
+    """Steps through trace entries (trace.md); the values reached are read from entries
+    0..k, never computed."""
+
+    def __init__(self, entries):
+        self.entries = list(entries)
+        self.k = 0
+
+    @property
+    def current(self):
+        return self.entries[self.k] if self.entries else None
+
+    @property
+    def at_end(self):
+        return self.k >= len(self.entries) - 1
+
+    @property
+    def label(self):
+        if not self.entries:
+            return "no trace entries"
+        return "%s · %d of %d" % (self.current["phase"], self.k + 1, len(self.entries))
+
+    def step(self, delta):
+        self.k = max(0, min(len(self.entries) - 1, self.k + delta))
+
+    def run_to_end(self):
+        self.k = max(0, len(self.entries) - 1)
+
+    def _find(self, test):
+        """The latest reached entry passing `test`, or None."""
+        for x in reversed(self.entries[:self.k + 1]):
+            if test(x):
+                return x
+        return None
+
+    def forward(self, pin, mode, rf):
+        """{at, slew, delay} of the forward entry of (pin, mode, rf); delay is the winner
+        candidate's (None for a source)."""
+        x = self._find(lambda x: x["phase"] == "forward" and (x["pin"], x["mode"], x["rf"]) == (pin, mode, rf))
+        if x is None:
+            return None
+        delay = x["candidates"][x["winner"]]["delay"] if x["winner"] is not None else None
+        return {"at": x["at"], "slew": x["slew"], "delay": delay}
+
+    def rat(self, pin, mode, rf):
+        kind = "setup" if mode == "late" else "hold"
+        x = self._find(lambda x: x["pin"] == pin and x["rf"] == rf and
+                       ((x["phase"] == "backward" and x["mode"] == mode) or
+                        (x["phase"] == "check" and x["kind"] == kind)))
+        return None if x is None else x["rat"]
+
+    def check(self, pin, kind, rf):
+        return self._find(lambda x: x["phase"] == "check" and (x["pin"], x["kind"], x["rf"]) == (pin, kind, rf))
+
+    def slack(self, pin, kind, rf):
+        x = self._find(lambda x: x["phase"] == "slack" and (x["pin"], x["kind"], x["rf"]) == (pin, kind, rf))
+        return None if x is None else x["slack"]
+
+    @staticmethod
+    def ordered(entry):
+        """The entry's candidates, the winner first, then the others in log order."""
+        cands = entry.get("candidates") or []
+        w = entry.get("winner")
+        if w is None:
+            return list(cands)
+        return [cands[w]] + [c for i, c in enumerate(cands) if i != w]
+
+
+def trace_table(sections, path, replay):
+    """path_table sections for the Trace tab: data rows take slew, incr, AT, RAT and slack
+    from the replay (None = not reached); other rows keep their path-object values, blank
+    until the replay reaches the first point (source / input section) or the endpoint's
+    check entry (destination section). Returns (sections, final slack or None)."""
+    mode, check = MODE[path["check"]], path["check"]
+    pts = path["points"]
+    first = replay.forward(pts[0]["pin"], mode, pts[0]["rf"]) is not None
+    end = pts[-1]
+    checked = replay.check(end["pin"], check, end["rf"]) is not None
+    out = []
+    for n, sec in enumerate(sections):
+        rows = []
+        for r in sec["rows"]:
+            r = dict(r)
+            if "arc" in r:
+                rf = r["rf"][-1]
+                f = replay.forward(r["label"], mode, rf) or {}
+                r.update(slew=f.get("slew"), incr=f.get("delay"), value=f.get("at"),
+                         rat=replay.rat(r["label"], mode, rf), slack=replay.slack(r["label"], check, rf))
+                r["largest"] = r["largest"] and r["incr"] is not None
+            elif (n == 0 and not first) or (n == 2 and not checked):
+                r.update(incr=None, value=None)
+            rows.append(r)
+        out.append({"title": sec["title"], "rows": rows})
+    return out, replay.slack(end["pin"], check, end["rf"])
+
+
+def auto_expand(path, source, limit=300):
+    """The schematic with every side input expanded, round by round, until no expand stub
+    is left or the drawing has `limit` pins or more. Returns (layout, truncated)."""
+    expanded = []
+    while True:
+        lay = schematic(path, source, expanded)
+        stubs = [s["pin"] for s in lay["stubs"] if s["state"] == "expand"]
+        pins = sum(len(e["pins"]) for e in lay["elements"])
+        if not stubs or pins >= limit:
+            return lay, bool(stubs)
+        expanded = lay["expanded"] + stubs
