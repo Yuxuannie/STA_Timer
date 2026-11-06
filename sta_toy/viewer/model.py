@@ -386,8 +386,8 @@ def histogram(values, bins=12):
 
 def path_table(path, source):
     """The path in three sections (Vivado style): source clock path, data path, destination
-    clock path. Data rows carry the pin's AT, RAT and slack of the check's mode, its load and
-    slews (walkthrough §10); `index` is the path point. Clock rows have no pin values.
+    clock path. Data rows carry the pin's AT, RAT and slack of the check's mode, its load,
+    fanout and slews (walkthrough §10); `index` is the path point. Clock rows have no pin values.
     `largest` marks the data rows of kind cell / ckq whose incr is the largest one (within
     1e-9; ties: all)."""
     pts, check = path["points"], path["check"]
@@ -417,7 +417,8 @@ def path_table(path, source):
             arc = "%s→%s" % (_short(pts[k - 1]["pin"]), _short(q["pin"]))
         data.append({"label": q["pin"], "cell": q["cell"], "arc": arc, "kind": q["arc"],
                      "rf": q["rf"] if q["arc"] not in ("cell", "ckq") else "%s→%s" % (pts[k - 1]["rf"], q["rf"]),
-                     "load": q["cap"], "slew_in": pts[k - 1]["slew"] if q["arc"] in ("cell", "ckq") else None,
+                     "load": q["cap"], "fanout": info.get("fanout"),
+                     "slew_in": pts[k - 1]["slew"] if q["arc"] in ("cell", "ckq") else None,
                      "slew": q["slew"], "incr": q["incr"], "value": q["at"], "rat": rat, "slack": slack,
                      "index": k})
     cells = [r["incr"] for r in data if r["kind"] in ("cell", "ckq")]
@@ -432,6 +433,21 @@ def path_table(path, source):
     return [{"title": "Source clock path" if s["launch_latency"] is not None else "Input", "rows": src},
             {"title": "Data path", "rows": data},
             {"title": "Destination clock path" if cap["pin"] is not None else "Output", "rows": dst}]
+
+
+def lookups(path, source, k):
+    """The table lookups behind path point k as [(label, lookup.lookup_detail dict)]: delay
+    and output slew of a cell / ckq arc, t_setup / t_hold of the capture D pin; [] for other
+    points and when the source has no tables (a bundle)."""
+    pts, check = path["points"], path["check"]
+    q = pts[k]
+    if q["arc"] in ("cell", "ckq"):
+        d = source.arc_lookup(pts[k - 1]["pin"], q["pin"], check, pts[k - 1]["rf"], q["rf"])
+        return [("delay", d["delay"]), ("output slew", d["slew"])] if d else []
+    if k == len(pts) - 1 and path["capture"]["pin"] is not None:
+        d = source.check_lookup(q["pin"], check, q["rf"])
+        return [("t_" + check, d)] if d else []
+    return []
 
 
 def near_critical(period):

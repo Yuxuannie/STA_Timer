@@ -26,7 +26,8 @@ ROW = 26
 THIN = "\u2009"
 TABS = ("schematic", "waveform")
 TABLE = [("pin", 128, "w"), ("cell", 62, "w"), ("arc", 58, "w"), ("rf", 44, "w"), ("load", 66, "e"),
-         ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"), ("pin slack", 100, "e")]
+         ("fanout", 66, "e"), ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"),
+         ("pin slack", 100, "e")]
 HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2 views   [ / ] hide panels   "
         "drag a divider to resize   click ⊕ to open the driving cell   ⌘-scroll zoom   F fit")
 
@@ -1066,7 +1067,7 @@ class App:
             self._eyebrow(cv, P(24), y + P(12), sec["title"])
             rows = sec["rows"]
             if sec["title"] == "Data path" and rows:
-                self._text(cv, num(7), y + P(12), "Σ " + fmt4(model.summary(path)["data_path"]), "mono", 10, False,
+                self._text(cv, num(8), y + P(12), "Σ " + fmt4(model.summary(path)["data_path"]), "mono", 10, False,
                            "faint", "e")
             y += P(26)
             for r in rows:
@@ -1079,18 +1080,19 @@ class App:
                 if "arc" in r:
                     cell_row = r["kind"] in ("cell", "ckq")
                     values = [r["label"], r["cell"] or "port", r["arc"], r["rf"],
-                              _num(r["load"]) if r["load"] is not None else "", _num(r["slew"]),
+                              _num(r["load"]) if r["load"] is not None else "",
+                              "" if r["fanout"] is None else str(r["fanout"]), _num(r["slew"]),
                               ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), fmt4(r["value"]),
                               _num(r["rat"]), _num(r["slack"])]
                     for k, (v, (cx, cw, anchor)) in enumerate(zip(values, xs)):
                         colour = "ink"
-                        if k in (1, 2, 3, 4, 5, 8):
+                        if k in (1, 2, 3, 4, 5, 6, 9):
                             colour = "muted"
-                        elif k == 6 and not cell_row:
+                        elif k == 7 and not cell_row:
                             colour = "faint"
-                        elif k == 9 and r["slack"] is not None:
+                        elif k == 10 and r["slack"] is not None:
                             colour = "bad" if _neg(r["slack"]) else "ok"
-                        bold = (k == 0 and on) or (k == 6 and r["largest"])
+                        bold = (k == 0 and on) or (k == 7 and r["largest"])
                         self._text(cv, cx + (cw - P(6) if anchor == "e" else 0), mid, v, "ui" if k < 4 else "mono",
                                    12 if k < 4 else 11, bold, colour, anchor)
                     hit = cv.create_rectangle(0, y, w, y + row_h, outline="", fill="")
@@ -1099,9 +1101,9 @@ class App:
                     label = r["label"] + ("  (%s)" % r["cell"] if r.get("cell") else "")
                     self._text(cv, xs[0][0], mid, label, "ui", 12, False, "ink" if r.get("cell") else "muted")
                     if r.get("incr") is not None:
-                        self._text(cv, num(6), mid, ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), "mono", 11,
+                        self._text(cv, num(7), mid, ("+" if r["incr"] >= 0 else "") + fmt4(r["incr"]), "mono", 11,
                                    False, "muted", "e")
-                    self._text(cv, num(7), mid, fmt4(r["value"]), "mono", 11, r["label"] == "required", "ink", "e")
+                    self._text(cv, num(8), mid, fmt4(r["value"]), "mono", 11, r["label"] == "required", "ink", "e")
                     if idx is not None:
                         hit = cv.create_rectangle(0, y, w, y + row_h, outline="", fill="")
                         self._hit(cv, hit, lambda k=idx: self.select_stage(k))
@@ -1112,7 +1114,7 @@ class App:
         mid = y + row_h / 2.0 + P(4)
         self._run(cv, P(24), mid, [("slack", "ui", 12, True, "ink", 10),
                                 (self._caps("violated" if bad else "met"), "ui", 9, True, "bad" if bad else "ok", 0)])
-        self._text(cv, num(7), mid, fmt4(path["slack"]), "mono", 12, True, "bad" if bad else "ok", "e")
+        self._text(cv, num(8), mid, fmt4(path["slack"]), "mono", 12, True, "bad" if bad else "ok", "e")
         note = self._text(cv, right + P(12), mid, "pin slack: the worst slack through the pin", "ui", 10, False, "faint")
         cv.configure(scrollregion=(0, 0, max(w, cv.bbox(note)[2] + P(12)), y + row_h + P(24)))
 
@@ -1177,6 +1179,9 @@ class App:
             colour = "ink" if label == "load" else ("faint" if v is None else ("bad" if _neg(v) else "ok"))
             self._text(cv, P(20), yy, label, "ui", 11, False, "muted")
             self._text(cv, w - P(20), yy, _num(v), "mono", 11, False, colour, "e")
+            if label == "load" and info.get("fanout") is not None:
+                self._run(cv, w - P(170), yy, [("fanout", "ui", 10, False, "faint", 5),
+                                               (str(info["fanout"]), "mono", 11, False, "ink", 0)])
             yy += P(22)
         return yy + P(8)
 
@@ -1207,13 +1212,44 @@ class App:
         else:
             title = "launch"
             lines = [("start", "%s at %s" % (point["pin"], fmt4(point["at"])))]
+        grids = dict(model.lookups(path, self.source, k))      # engine mode only
         yy = self._section(cv, y, title, w)
         for label, value in lines:
             result = label.startswith("→")
             self._text(cv, P(20), yy, label, "ui", 11, False, "ink" if result else "muted")
             self._text(cv, w - P(20), yy, value, "mono", 11, result, "ink", "e")
             yy += P(22)
+            if result and label[2:] in grids:
+                yy = self._lookup_grid(grids[label[2:]], yy - P(2))
         return yy + P(8)
+
+    def _lookup_grid(self, d, y):
+        """One lookup.lookup_detail block under its result line: each axis (row = the table's
+        first variable, col = its second) with its query value and, when outside the grid,
+        `extrapolated below / above`; then the four corner values under the bracketing index
+        values."""
+        P = self.px
+        cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
+        for tag, name, query, side in zip(("row", "col"), d["axes"], d["query"], d["extrapolated"]):
+            _, x, _ = self._run(cv, P(34), y, [(tag, "ui", 9, False, "faint", 6), (name, "ui", 10, False, "muted", 0)])
+            if x + P(8) > w - P(20) - self.font("mono", 10).measure(fmt4(query)):
+                y += P(16)               # a long axis name: its value goes under it
+            self._text(cv, w - P(20), y, fmt4(query), "mono", 10, False, "ink", "e")
+            y += P(16)
+            if side:
+                self._text(cv, P(58), y, "extrapolated " + side, "ui", 10, False, "bad")
+                y += P(16)
+        cols = (w - P(96), w - P(20))
+        (row_lo, row_hi), (col_lo, col_hi) = d["bracket"]
+        for x, v in zip(cols, (col_lo, col_hi)):
+            self._text(cv, x, y, fmt4(v), "mono", 10, False, "faint", "e")
+        y += P(16)
+        for i, v in enumerate((row_lo, row_hi)):
+            self._text(cv, w - P(172), y, fmt4(v), "mono", 10, False, "faint", "e")
+            for x, corner in zip(cols, d["corners"][i]):
+                self._text(cv, x, y, fmt4(corner), "mono", 10, False, "ink", "e")
+            y += P(16)
+        return y + P(8)
 
     def _merge_card(self, title, cands, key, rf, y):
         P = self.px

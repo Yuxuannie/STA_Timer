@@ -12,13 +12,16 @@ which one they have:
                           the binding one first
   driver(pin)          the pin driving an input pin over a net, or None
   arrival(pin, check)  (AT, rf) of the check's mode, worst transition (ties to r), or None
-  pin(name)            {"pin", "kind", "cell", "at", "rat", "slew", "slack", "load"} or None
+  pin(name)            {"pin", "kind", "cell", "at", "rat", "slew", "slack", "load", "fanout"} or None
   arcs(inst)           [{"from", "to", "kind", "delay": {mode: {pair: value}}}]
+  arc_lookup(from_pin, to_pin, check, rf_from, rf_to)
+                       {"delay", "slew"}: lookup.lookup_detail of the arc's tables, or None
+  check_lookup(pin, check, rf)   lookup.lookup_detail of a D pin's constraint table, or None
 """
 
 import json
 
-from sta_toy import P2Error, design, paths, timer
+from sta_toy import P2Error, design, lookup, paths, timer
 
 SCHEMA = "sta_toy.bundle/1"
 MODE = {"setup": "late", "hold": "early"}
@@ -128,9 +131,10 @@ class EngineSource:
             found = [timer.slack(n, check, rf) for rf in ("r", "f")]
             found = [s for s in found if s is not None]
             slack[check] = min(found) if found else None
-        drives = any(a.kind == "net" for a in n.fanout)
+        nets = sum(1 for a in n.fanout if a.kind == "net")
         return {"pin": n.name, "kind": n.kind, "cell": n.cell, "at": n.at, "rat": n.rat,
-                "slew": n.slew, "slack": slack, "load": n.load if drives else None}
+                "slew": n.slew, "slack": slack, "load": n.load if nets else None,
+                "fanout": nets or None}
 
     def arcs(self, inst):
         out = []
@@ -148,6 +152,36 @@ class EngineSource:
                         delay[m][ab] = timer.arc_delay(a, m, ab[0], ab[1])[0] if ok else None
                 out.append({"from": a.src.name, "to": n.name, "kind": a.kind, "delay": delay})
         return out
+
+    def arc_lookup(self, from_pin, to_pin, check, rf_from, rf_to):
+        """The delay and transition lookups of the cell / ckq arc from_pin -> to_pin at the
+        arguments timer.arc_delay uses; of several such arcs, the one whose delay gives the
+        arrival (late largest, early smallest; ties to the first)."""
+        node, mode = self.g.by_name[to_pin], MODE[check]
+        found = []
+        for a in node.fanin:
+            if a.src.name == from_pin and a.tables is not None and (rf_from, rf_to) in a.pairs \
+                    and a.src.slew[mode][rf_from] is not None:
+                delay, transition = a.tables[rf_to]
+                args = {"input_net_transition": a.src.slew[mode][rf_from],
+                        "total_output_net_capacitance": node.load}
+                found.append({"delay": lookup.lookup_detail(delay, args),
+                              "slew": lookup.lookup_detail(transition, args)})
+        if not found:
+            return None
+        best = (max if mode == "late" else min)(d["delay"]["value"] for d in found)
+        return [d for d in found if d["delay"]["value"] == best][0]
+
+    def check_lookup(self, pin, check, rf):
+        """The setup / hold constraint lookup of D pin `pin` at (D slew, CK slew), as
+        timer.check computes it (a later group of the same kind wins)."""
+        node, mode = self.g.by_name[pin], MODE[check]
+        found = None
+        for c in node.checks:
+            if c.kind == check and node.slew[mode][rf] is not None and c.ck.at[mode]["r"] is not None:
+                found = lookup.lookup_detail(c.tables[rf], {"constrained_pin_transition": node.slew[mode][rf],
+                                                           "related_pin_transition": c.ck.slew[mode]["r"]})
+        return found
 
 
 class BundleSource:
@@ -231,9 +265,16 @@ class BundleSource:
         if n is None:
             return None
         return {"pin": n["pin"], "kind": n["kind"], "cell": n["cell"], "at": n["at"],
-                "rat": n["rat"], "slew": n["slew"], "slack": n["slack"], "load": n["cap"]}
+                "rat": n["rat"], "slew": n["slew"], "slack": n["slack"], "load": n["cap"],
+                "fanout": n.get("fanout")}      # only if the bundle carries it (its edges stop at the cone)
 
     def arcs(self, inst):
         return [{"from": e["u"], "to": e["v"], "kind": e["kind"], "delay": e["delay"]}
                 for e in self.data["edges"]
                 if e["kind"] in ("cell", "ckq") and e["v"].split("/")[0] == inst and "/" in e["v"]]
+
+    def arc_lookup(self, from_pin, to_pin, check, rf_from, rf_to):
+        return None                     # a bundle holds delays, not tables
+
+    def check_lookup(self, pin, check, rf):
+        return None

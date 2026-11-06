@@ -23,6 +23,7 @@ DESIGNS = [("ff2_default", "ff2"), ("ff2_swap", "ff2"), ("ff2_setupviol", "ff2")
            ("ff2_holdviol", "ff2"), ("ff2_skew", "ff2"), ("ff2_unc", "ff2"),
            ("inv2", "inv2"), ("s27", "s27")]
 MODE = {"setup": "late", "hold": "early"}
+THIN = "\u2009"
 _SOURCES = {}
 
 
@@ -386,6 +387,61 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual([text for _, text, _ in wave["rows"][1]["labels"]], ["13.5000"])
         self.assertEqual([text for _, text, _ in wave["rows"][0]["labels"]], ["0.0000", "10.0000"])
 
+    def blocks(self, scenario, netlist, endpoint, check, pin):
+        src = engine(scenario, netlist)
+        path = src.paths(endpoint)[check]
+        k = [q["pin"] for q in path["points"]].index(pin)
+        return path["points"][k], model.lookups(path, src, k)
+
+    def test_lookup_blocks(self):
+        # R34: the grid behind each lookup, at the arguments the engine used (the block's value
+        # is the path's number). Slew axis below the grid where the source slew is 0: the CK pin
+        # (s27 has no set_clock_transition) and G2 (no set_input_transition).
+        slew = lambda d: d["extrapolated"][d["axes"].index("input_net_transition")]
+        for endpoint, check, pin in (("FF7/D", "setup", "FF7/Q"), ("FF7/D", "hold", "U13/Y")):
+            point, blocks = self.blocks("s27", "s27", endpoint, check, pin)
+            self.assertEqual([label for label, _ in blocks], ["delay", "output slew"])
+            self.assertEqual([slew(d) for _, d in blocks], ["below", "below"])
+            self.assertEqual(fmt4(blocks[0][1]["value"]), fmt4(point["incr"]))
+        # U14 is driven by G0 (slew 0.05): inside the grid; FF2/D's setup lookup has its CK
+        # slew 0.05 inside too, s27 FF5/D's CK slew 0 is below.
+        point, blocks = self.blocks("s27", "s27", "FF5/D", "setup", "U14/Y")
+        self.assertEqual([d["extrapolated"] for _, d in blocks], [[None, None], [None, None]])
+        self.assertEqual((fmt4(blocks[0][1]["value"]), fmt4(blocks[1][1]["value"])), (fmt4(point["incr"]), fmt4(point["slew"])))
+        point, blocks = self.blocks("s27", "s27", "FF5/D", "setup", "FF5/D")
+        self.assertEqual([(label, d["extrapolated"]) for label, d in blocks], [("t_setup", [None, "below"])])
+        # ff2_default U2/Y: no extrapolation on either axis; the four corners bracket the query.
+        point, blocks = self.blocks("ff2_default", "ff2", "FF2/D", "setup", "U2/Y")
+        for label, d in blocks:
+            self.assertEqual(d["extrapolated"], [None, None], label)
+            for (lo, hi), q in zip(d["bracket"], d["query"]):
+                self.assertTrue(lo <= q <= hi)
+        point, blocks = self.blocks("ff2_default", "ff2", "FF2/D", "hold", "FF2/D")
+        self.assertEqual(fmt4(blocks[0][1]["value"]), fmt4(engine("ff2_default", "ff2").paths("FF2/D")["hold"]["capture"]["check"]))
+        self.assertEqual(self.blocks("ff2_default", "ff2", "FF2/D", "setup", "U2/B")[1], [])     # a net hop
+
+    def test_lookup_blocks_bundle(self):
+        # R34: a bundle has no tables, so no grid in bundle mode.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "b.json")
+            with open(path, "w") as f:
+                json.dump(bundle.debug_bundle(engine("ff2_default", "ff2").g, "FF2/D", depth=2), f)
+            b = BundleSource(path)
+        p = b.paths("FF2/D")["setup"]
+        self.assertEqual([model.lookups(p, b, k) for k in range(len(p["points"]))], [[]] * len(p["points"]))
+
+    def test_fanout(self):
+        # R34: net arcs leaving the pin; None for pins that drive no net (inputs, the capture pin).
+        src = engine("inv2", "inv2")
+        nets = [a for a in src.g.by_name["FF1/Q"].fanout if a.kind == "net"]
+        self.assertEqual(src.pin("FF1/Q")["fanout"], len(nets))
+        self.assertEqual((src.pin("U3/A")["fanout"], src.pin("y")["fanout"]), (None, None))
+        rows = model.path_table(src.paths("y")["setup"], src)[1]["rows"]
+        self.assertEqual([(r["label"], r["fanout"]) for r in rows],
+                         [("FF1/Q", len(nets)), ("U3/A", None), ("U3/Y", 1), ("y", None)])
+        s27 = engine("s27", "s27")
+        self.assertEqual((s27.pin("U14/Y")["fanout"], s27.pin("G0")["fanout"]), (2, 1))   # U8/A, U10/A
+
     def test_near_critical(self):
         # R33: 1 % of the clock period (was the constant 0.05).
         self.assertEqual(fmt4(model.near_critical(engine("s27", "s27").period)), "0.1000")
@@ -545,6 +601,14 @@ class TkSmokeTests(unittest.TestCase):
             self.assertIn("near-critical: margin < 0.1000", insp)  # R33: 1 % of the period
             app.select_cell("U9")
             self.assertTrue(any("NAND2" in t for t in self.texts(app.insp)))
+            app.select_endpoint("FF7/D")                          # R34: CK slew 0, below the grid
+            app.select_stage(1)
+            insp = self.texts(app.insp)
+            self.assertIn("extrapolated below", insp)
+            self.assertIn("input_net_transition", insp)
+            app.select_pin("FF7/Q")
+            self.assertIn("fanout", self.texts(app.insp))
+            self.assertIn("FANOUT", [t.replace(THIN, "") for t in self.texts(app.table)])
             app.filter_bin(0)
             app.filter_bin(0)
             app.set_zoom(1.5)
