@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from sta_toy import P2Error, bundle
@@ -19,6 +20,7 @@ from sta_toy.viewer.source import BundleSource, EngineSource
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "data", "toy2.lib")
 FF2_V = os.path.join(ROOT, "data", "ff2.v")
+S1423 = (os.path.join(ROOT, "data", "s1423.v"), os.path.join(ROOT, "data", "sdc", "s1423.sdc"))   # W3, R38
 DESIGNS = [("ff2_default", "ff2"), ("ff2_swap", "ff2"), ("ff2_setupviol", "ff2"),
            ("ff2_holdviol", "ff2"), ("ff2_skew", "ff2"), ("ff2_unc", "ff2"),
            ("inv2", "inv2"), ("s27", "s27")]
@@ -631,6 +633,25 @@ class TkSmokeTests(unittest.TestCase):
         app.expand("U2/A")
         self.assertTrue(any(e["name"] == "FF1" for e in app.layout["elements"]))
         self.assertEqual(app.errors, [])
+
+    @unittest.skipUnless(all(os.path.exists(p) for p in S1423), "data/s1423.v or data/sdc/s1423.sdc not here")
+    def test_s1423_in_10_seconds(self):
+        """PROMPT_P5 section 6: open s1423 (about 1000 instances), the worst setup endpoint, both
+        views, three left / right steps, Hold, [ and ], within 10 s of wall clock."""
+        start = time.time()
+        src = EngineSource([LIB], S1423[0], S1423[1])
+        app = self.App(self.root, src, "light")
+        self.assertEqual(app.endpoint, model.EndpointList(src.rows()).view()[0]["pin"])
+        for tab in ("schematic", "waveform"):
+            app.set_tab(tab)
+        for delta in (-1, -1, 1):
+            app.step(delta)
+        app.set_check("hold")
+        app.toggle_panel("left")
+        app.toggle_panel("right")
+        self.root.update()
+        self.assertEqual(app.errors, [])
+        self.assertLess(time.time() - start, 10.0)
 
     def test_scale(self):
         # R32: pixels times s, fonts times s on aqua (s / default elsewhere), minimum from the panes.
