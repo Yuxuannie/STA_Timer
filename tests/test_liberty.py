@@ -1,7 +1,11 @@
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
+from fractions import Fraction
 
-from sta_toy import liberty
+from sta_toy import P2Error, liberty, lookup
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOY_LIB = os.path.join(ROOT, "data", "toy.lib")
@@ -264,6 +268,107 @@ class TimingAccessorTests(unittest.TestCase):
         table = liberty.loads(text, "o.lib").cells["C"].pin("Z").timings[0].tables["cell_rise"]
         self.assertEqual((table.index_1, table.index_2), ([1.0, 2.0], [30.0, 40.0]))
         self.assertEqual(table.variables, ("input_net_transition", "total_output_net_capacitance"))
+
+
+def generate(directory, *options):
+    """tools/gen_toy2_lib.py with `options`, written into `directory`; returns the path."""
+    path = os.path.join(directory, "toy2_psff.lib")
+    with open(path, "w") as f:
+        subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_toy2_lib.py")]
+                       + list(options), stdout=f, check=True)
+    return path
+
+
+SHARED = (
+    "library (s) {\n"
+    '  time_unit : "1ps";\n'
+    "  capacitive_load_unit (1, ff);\n"
+    "  lu_table_template (t) {\n"
+    "    variable_1 : input_net_transition;\n"
+    "    variable_2 : total_output_net_capacitance;\n"
+    '    index_1 ("10, 20");\n'
+    '    index_2 ("1, 2");\n'
+    "  }\n"
+    "  cell (C) {\n"
+    "    pin (A) { direction : input; capacitance : 3; }\n"
+    "    pin (Z) {\n"
+    "      direction : output;\n"
+    "      timing () {\n"
+    '        related_pin : "A";\n'
+    '        cell_rise (t) { values ("100, 200", "300, 400"); }\n'
+    '        cell_fall (t) { values ("100, 200", "300, 400"); }\n'
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+class UnitTests(unittest.TestCase):
+    """R37: units of every library; a second library converted to the main one's units."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def converted(self, lib):
+        main = liberty.units(liberty.load(TOY2_LIB), TOY2_LIB)
+        own = liberty.units(lib, "x.lib")
+        liberty.convert(lib, own[0] / main[0], own[1] / main[1])
+        return lib
+
+    def test_units(self):
+        for path in (TOY2_LIB, TOY_LIB):
+            self.assertEqual(liberty.units(liberty.load(path), path),
+                             (Fraction(1, 10 ** 9), Fraction(1, 10 ** 12)))
+
+    def test_converted_lookup(self):
+        lib = self.converted(liberty.load(generate(self.tmp, "--time", "ps", "--cap", "ff",
+                                                   "--suffix", "_P")))
+        timing = lib.cells["BUF_P"].pin("Y").timings[0]
+        args = {"input_net_transition": 0.01, "total_output_net_capacitance": 0.016}
+        self.assertAlmostEqual(lookup.lookup(timing.tables["cell_rise"], args), 2.12, delta=1e-9)
+        self.assertAlmostEqual(lookup.lookup(timing.tables["rise_transition"], args), 0.112,
+                               delta=1e-9)
+        self.assertAlmostEqual(lib.cells["BUF_P"].pin("A").capacitance, 0.0015, delta=1e-15)
+        hold = lib.cells["DFF_P"].pin("D").timings[1].tables["rise_constraint"]
+        self.assertAlmostEqual(lookup.lookup(hold, {"constrained_pin_transition": 0.05,
+                                                    "related_pin_transition": 0.05}),
+                               0.1, delta=1e-9)
+
+    def test_tree_not_converted_and_template_scaled_once(self):
+        lib = self.converted(liberty.loads(SHARED, "s.lib"))
+        tables = lib.cells["C"].pin("Z").timings[0].tables
+        for kind in ("cell_rise", "cell_fall"):
+            # Both tables use the template's index lists: each is scaled once.
+            self.assertEqual([round(x, 12) for x in tables[kind].index_1], [0.01, 0.02])
+            self.assertEqual([round(x, 12) for x in tables[kind].index_2], [0.001, 0.002])
+            self.assertEqual([[round(v, 12) for v in r] for r in tables[kind].values],
+                             [[0.1, 0.2], [0.3, 0.4]])
+        self.assertAlmostEqual(lib.cells["C"].pin("A").capacitance, 0.003, delta=1e-15)
+        # The generic tree keeps what the file says.
+        root = liberty.parse(SHARED, "s.lib")
+        self.assertEqual(find_group(root, "lu_table_template", "t").find_attrs("index_1")[0].values,
+                         ["10, 20"])
+
+    def test_missing_and_unknown_units(self):
+        cases = [(SHARED.replace('  time_unit : "1ps";\n', ""), "missing time_unit"),
+                 (SHARED.replace("  capacitive_load_unit (1, ff);\n", ""),
+                  "missing capacitive_load_unit"),
+                 (SHARED.replace('"1ps"', '"1min"'), "unknown time_unit 1min"),
+                 (SHARED.replace("(1, ff)", "(1, kf)"), "unknown capacitive_load_unit kf")]
+        for text, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaises(P2Error) as e:
+                    liberty.units(liberty.loads(text, "s.lib"), "s.lib")
+                self.assertEqual(str(e.exception), "s.lib: library s: " + message)
+
+    def test_default_generator_output_is_toy2(self):
+        with open(generate(self.tmp), "rb") as f, open(TOY2_LIB, "rb") as g:
+            self.assertEqual(f.read(), g.read())
 
 
 if __name__ == "__main__":

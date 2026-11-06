@@ -5,10 +5,17 @@ from sta_toy import graph, liberty, sdc, timer, verilog
 
 
 def load(lib_paths, verilog_path):
-    """(library, netlist, linked stage 1 graph). Repeated libraries: first cell wins."""
-    libs = [liberty.load(path) for path in lib_paths]
-    lib = libs[0]
-    for other in libs[1:]:
+    """(library, netlist, linked stage 1 graph). Repeated libraries: first cell wins.
+    R37: every library declares its units; the others are converted to the first's."""
+    lib, main = None, None
+    for path in lib_paths:
+        other = liberty.load(path)
+        scale = liberty.units(other, path)
+        if lib is None:
+            lib, main = other, scale
+            continue
+        if scale != main:
+            liberty.convert(other, scale[0] / main[0], scale[1] / main[1])
         for name, cell in other.cells.items():
             lib.cells.setdefault(name, cell)
     netlist = verilog.load(verilog_path)
