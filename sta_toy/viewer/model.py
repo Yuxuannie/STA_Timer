@@ -1,7 +1,8 @@
 """Viewer model without Tk (R28, viewer_p4.md): the endpoint list and slack histogram, a
-path's summary, formula terms, three-section path table, stage profile and waveform, its
-stages pin to pin, and the path schematic with cells drawn as gates on a grid."""
+path's summary, formula terms, three-section path table and waveform, its stages pin to
+pin, and the path schematic with cells drawn as gates on a grid."""
 
+import math
 import re
 
 from sta_toy.tsv import fmt4
@@ -383,26 +384,12 @@ def histogram(values, bins=12):
     return out
 
 
-def profile(path):
-    """One bar per path stage on the time axis: the launch (clock latency or input delay)
-    and every cell arc, each {label, kind, t0, t1, delay, index}."""
-    pts = path["points"]
-    s = summary(path)
-    bars = [{"label": "clock latency" if s["launch_latency"] is not None else "input delay",
-             "kind": "launch", "t0": 0.0, "t1": pts[0]["at"], "delay": pts[0]["at"], "index": 0}]
-    for k, q in enumerate(pts):
-        if q["arc"] in ("cell", "ckq"):
-            bars.append({"label": "%s %s %s→%s" % (q["pin"].split("/")[0], q["cell"],
-                                                   _short(pts[k - 1]["pin"]), _short(q["pin"])),
-                         "kind": q["arc"], "t0": pts[k - 1]["at"], "t1": q["at"],
-                         "delay": q["incr"], "index": k})
-    return bars
-
-
 def path_table(path, source):
     """The path in three sections (Vivado style): source clock path, data path, destination
     clock path. Data rows carry the pin's AT, RAT and slack of the check's mode, its load and
-    slews (walkthrough §10); `index` is the path point. Clock rows have no pin values."""
+    slews (walkthrough §10); `index` is the path point. Clock rows have no pin values.
+    `largest` marks the data rows of kind cell / ckq whose incr is the largest one (within
+    1e-9; ties: all)."""
     pts, check = path["points"], path["check"]
     mode = MODE[check]
     s = summary(path)
@@ -433,6 +420,9 @@ def path_table(path, source):
                      "load": q["cap"], "slew_in": pts[k - 1]["slew"] if q["arc"] in ("cell", "ckq") else None,
                      "slew": q["slew"], "incr": q["incr"], "value": q["at"], "rat": rat, "slack": slack,
                      "index": k})
+    cells = [r["incr"] for r in data if r["kind"] in ("cell", "ckq")]
+    for r in data:
+        r["largest"] = r["kind"] in ("cell", "ckq") and abs(r["incr"] - max(cells)) <= 1e-9
     dst = []
     for r in capture_rows(path)[:-3]:
         dst.append({"label": r["label"], "incr": r["delta"], "value": r["value"]})
@@ -444,12 +434,42 @@ def path_table(path, source):
             {"title": "Destination clock path" if cap["pin"] is not None else "Output", "rows": dst}]
 
 
-def waveform(setup, hold, period, check="setup"):
+def near_critical(period):
+    """The merge margin under which a losing candidate is near-critical: 1 % of the period."""
+    return 0.01 * period
+
+
+def _edge_labels(row, span, lines, text_width, units):
+    """[(t, text, anchor)] for every rising edge t of a clock row inside the span: right of
+    the edge (anchor w) or else left of it (anchor e, not before the span start); dropped if
+    both would overlap an earlier label of the row or a mark line strictly inside."""
+    t0, t1 = span
+    period = row["period"]
+    t = row["edges"][0] - period * math.floor((row["edges"][0] - t0) / period)
+    labels, taken = [], []
+    while t <= t1:
+        text = fmt4(t)
+        w = text_width(text) * units if text_width else 0.0
+        for anchor, a, b in (("w", t, t + w), ("e", t - w, t)):
+            if a < t0 or any(a < m < b for m in lines) or any(a < y and x < b for x, y in taken):
+                continue
+            labels.append((t, text, anchor))
+            taken.append((a, b))
+            break
+        t += period
+    return labels
+
+
+def waveform(setup, hold, period, check="setup", text_width=None, axis_px=None):
     """Walkthrough §6 for one endpoint, in time units: the launch and capture clock edges, the
     data at the endpoint changing between the earliest (hold path) and latest (setup path)
     arrival, the setup and hold windows, and both slacks. `setup` / `hold` are path objects
     (either may be None); the launch row follows the path of `check` (the two worst paths may
-    start at different points). Returns {"span": (t0, t1), "rows": [...], "marks": [...]}."""
+    start at different points). Each clock row's `labels` name its rising edges (see
+    _edge_labels); `text_width(text)` is a label's width in pixels, `axis_px` the span's
+    width in pixels (without them labels have width 0); the dashed mark lines at each
+    required time cross the capture row only. Returns {"span": (t0, t1), "rows": [...],
+    "marks": [...]}."""
     any_path = (setup if check == "setup" else hold) or setup or hold
     s_any = summary(any_path)
     launch_l = s_any["launch_latency"]
@@ -476,4 +496,8 @@ def waveform(setup, hold, period, check="setup"):
         times += list(m["window"]) + [m["required"], m["arrival"]]
     span = (min(times + [0.0]), max(times))
     pad = (span[1] - span[0]) * 0.04 or 1.0
-    return {"span": (span[0] - pad, span[1] + pad), "rows": rows, "marks": marks}
+    span = (span[0] - pad, span[1] + pad)
+    units = (span[1] - span[0]) / float(axis_px) if axis_px else 0.0
+    for row, lines in zip(rows[:2], ([], [m["required"] for m in marks])):
+        row["labels"] = _edge_labels(row, span, lines, text_width, units)
+    return {"span": span, "rows": rows, "marks": marks}

@@ -1,8 +1,8 @@
 """Tk window (R29, viewer_p4.md v3): a timing-debug workstation for one design.
 
 Left: the endpoint slack histogram and the endpoint list (triage). Centre: for the selected
-endpoint and check, a summary card with the slack formula term by term, three views of the
-worst path (gate-level schematic, waveform with setup and hold windows, stage profile), and
+endpoint and check, a summary card with the slack formula term by term, two views of the
+worst path (gate-level schematic, waveform with setup and hold windows), and
 the path table in three sections. Right: an inspector for the selected pin — its AT / RAT /
 slew, the table lookup behind its delay, and which input set its arrival and which fanout
 set its required time. Everything is drawn on canvases so every theme colours it fully."""
@@ -20,10 +20,10 @@ from sta_toy.viewer import model, theme
 ROW = 26
 MIN_LEFT, MIN_CENTER, MIN_RIGHT = 280, 460, 320     # narrowest panes whose columns still fit
 THIN = "\u2009"
-TABS = ("schematic", "waveform", "profile")
+TABS = ("schematic", "waveform")
 TABLE = [("pin", 128, "w"), ("cell", 62, "w"), ("arc", 58, "w"), ("rf", 44, "w"), ("load", 66, "e"),
          ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"), ("pin slack", 100, "e")]
-HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2/3 views   [ / ] hide panels   "
+HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2 views   [ / ] hide panels   "
         "drag a divider to resize   click ⊕ to open the driving cell   ⌘-scroll zoom   F fit")
 
 
@@ -242,7 +242,7 @@ class App:
                       ("<Up>", lambda: self.next_endpoint(-1)), ("<Down>", lambda: self.next_endpoint(1)),
                       ("<Key-s>", lambda: self.set_check("setup")), ("<Key-h>", lambda: self.set_check("hold")),
                       ("<Key-1>", lambda: self.set_tab("schematic")), ("<Key-2>", lambda: self.set_tab("waveform")),
-                      ("<Key-3>", lambda: self.set_tab("profile")), ("<Key-f>", self.fit),
+                      ("<Key-f>", self.fit),
                       ("<Key-bracketleft>", lambda: self.toggle_panel("left")),
                       ("<Key-bracketright>", lambda: self.toggle_panel("right"))):
             self.root.bind(k, key(fn))
@@ -928,9 +928,11 @@ class App:
         arrival, the hold and setup windows, and both slacks, each in its own lane."""
         cv, c = self.view, self.c
         w = max(cv.winfo_width(), 700)
-        wave = model.waveform(self.paths.get("setup"), self.paths.get("hold"), self.source.period, self.check)
-        t0, t1 = wave["span"]
-        x0, x1 = 236, w - 40
+        args = (self.paths.get("setup"), self.paths.get("hold"), self.source.period, self.check)
+        t0, t1 = model.waveform(*args)["span"]
+        label_w = lambda text: self.font("mono", 9).measure(text) + 6
+        x0, x1 = 236, w - max(40, label_w(fmt4(t1)) + 4)       # the last edge label still fits
+        wave = model.waveform(*args, text_width=label_w, axis_px=x1 - x0)
         X = lambda v: x0 + (v - t0) / (t1 - t0) * (x1 - x0)
         self._eyebrow(cv, 24, 18, "timing diagram · setup and hold of %s" % self.endpoint)
         lanes = {"launch": 64, "capture": 120, "data": 180}
@@ -952,15 +954,14 @@ class App:
             hi, lo = lane - 14, lane + 6
             period = row["period"]
             t = row["edges"][0] - period * math.ceil((row["edges"][0] - t0) / period)
-            pts, last_label = [(x0, lo)], -1e9
+            pts = [(x0, lo)]
             while t < t1:
                 for a, level in ((t, hi), (t + period / 2.0, lo)):
                     if t0 <= a <= t1:
                         pts += [(X(a), pts[-1][1]), (X(a), level)]
-                if t0 <= t <= t1 and X(t) - last_label > 60:
-                    self._text(cv, X(t) + 3, lo + 11, fmt4(t), "mono", 9, False, "faint")
-                    last_label = X(t)
                 t += period
+            for t, text, anchor in row["labels"]:
+                self._text(cv, X(t) + (3 if anchor == "w" else -3), lo + 11, text, "mono", 9, False, "faint", anchor)
             pts.append((x1, pts[-1][1]))
             cv.create_line(*[v for xy in pts for v in xy], fill=c["muted"], width=1.4)
         lane = lanes["data"]
@@ -1015,41 +1016,6 @@ class App:
         self._time_axis(cv, t0, t1, x0, x1, axis_y)
         self._text(cv, 24, axis_y + 6, "time (ns)", "ui", 10, False, "faint")
 
-    def _draw_profile(self):
-        cv, c = self.view, self.c
-        path = self.path()
-        w = max(cv.winfo_width(), 700)
-        bars = model.profile(path)
-        rows = len(bars)
-        cv.configure(scrollregion=(0, 0, w, max(rows * 30 + 120, cv.winfo_height())))
-        t1 = max(path["required"], path["arrival"], max(b["t1"] for b in bars))
-        t0 = min(0.0, path["required"])
-        x0, x1 = 230, w - 140
-        X = lambda v: x0 + (v - t0) / (t1 - t0) * (x1 - x0)
-        self._eyebrow(cv, 24, 18, "stage profile · where the %s path spends its time" % self.check)
-        big = max(b["delay"] for b in bars[1:]) if len(bars) > 1 else 0
-        y = 42
-        for b in bars:
-            on = self.stage == b["index"]
-            if on:
-                _rounded(cv, 12, y - 2, w - 12, y + 24, 5, fill=c["select"], outline="")
-            self._text(cv, 24, y + 11, b["label"], "ui", 12, on, "ink" if b["kind"] != "launch" else "muted")
-            colour = c["line"] if b["kind"] == "launch" else (c["accent"] if b["delay"] == big else c["wire"])
-            bar = cv.create_rectangle(X(b["t0"]), y + 5, max(X(b["t1"]), X(b["t0"]) + 2), y + 17, fill=colour, outline="")
-            self._text(cv, max(X(b["t1"]), X(b["t0"]) + 2) + 8, y + 11, "+" + fmt4(b["delay"]), "mono", 10, False,
-                       "accent_ink" if b["delay"] == big else "muted")
-            hit = cv.create_rectangle(0, y - 2, w, y + 24, outline="", fill="")
-            for it in (bar, hit):
-                self._hit(cv, it, lambda k=b["index"]: self.select_stage(k))
-            y += 28
-        first = "arrival" if path["arrival"] <= path["required"] else "required"
-        for label, value, colour in (("arrival", path["arrival"], "ink"), ("required", path["required"], "muted")):
-            left = label == first               # the left line's label goes left, the other's right
-            cv.create_line(X(value), 34, X(value), y + 4, fill=c[colour], dash=(4, 3), width=1.2)
-            self._text(cv, X(value) + (-4 if left else 4), y + 14, "%s %s" % (label, fmt4(value)), "mono", 9, False,
-                       colour, "e" if left else "w")
-        self._time_axis(cv, t0, t1, x0, x1, y + 34)
-
     # centre: path table ---------------------------------------------------------------
 
     def _draw_table(self):
@@ -1096,8 +1062,9 @@ class App:
                             colour = "faint"
                         elif k == 9 and r["slack"] is not None:
                             colour = "bad" if _neg(r["slack"]) else "ok"
+                        bold = (k == 0 and on) or (k == 6 and r["largest"])
                         self._text(cv, cx + (cw - 6 if anchor == "e" else 0), mid, v, "ui" if k < 4 else "mono",
-                                   12 if k < 4 else 11, k == 0 and on, colour, anchor)
+                                   12 if k < 4 else 11, bold, colour, anchor)
                     hit = cv.create_rectangle(0, y, w, y + ROW, outline="", fill="")
                     self._hit(cv, hit, lambda k=idx: self.select_stage(k))
                 else:
@@ -1222,7 +1189,10 @@ class App:
         if not cands:
             return y
         mode_word = ("max" if self.check == "setup" else "min") if key == "from" else ("min" if self.check == "setup" else "max")
+        limit = model.near_critical(self.source.period)
         yy = self._section(cv, y, "%s · %s of %d · %s" % (title, mode_word, len(cands), rf), w)
+        self._text(cv, 20, yy - 6, "near-critical: margin < %s" % fmt4(limit), "mono", 9, False, "faint")
+        yy += 16
         for i, cand in enumerate(cands):
             pin = cand[key]
             win = i == 0
@@ -1235,7 +1205,7 @@ class App:
                 expr = "RAT %s − %s %s" % (fmt4(cand["rat"]), cand["kind"], fmt4(cand["delay"]))
             self._text(cv, 34, yy + 17, expr, "mono", 10, False, "faint")
             if not win:
-                near = cand["margin"] < 0.05
+                near = cand["margin"] < limit - 1e-9
                 self._text(cv, w - 20, yy + 17, "Δ %s" % fmt4(cand["margin"]), "mono", 10, False,
                            "bad" if near else "faint", "e")
             hit = cv.create_rectangle(12, yy - 12, w - 12, yy + 26, outline="", fill="")
@@ -1265,5 +1235,4 @@ class App:
         self._clear(cv)
         w = max(cv.winfo_width(), 1200)
         cv.create_line(0, 0, w, 0, fill=c["line"])
-        note = self.source.note
-        self._text(cv, 20, 13, note or HINT, "ui", 10, False, "accent_ink" if note else "faint")
+        self._text(cv, 20, 13, HINT, "ui", 10, False, "faint")

@@ -2,6 +2,7 @@
 path schematic, sources, themes, the viewer CLI and a Tk smoke test. Expected values come
 from the contract by hand and from the P2 golden files."""
 
+import copy
 import json
 import os
 import re
@@ -251,28 +252,16 @@ class SourceTests(unittest.TestCase):
         self.assertIsNone(b.summary("setup"))
 
     def test_bundle_without_instances(self):
-        # A bundle written before "instances" existed still loads; its cells show the pins it mentions.
-        src = engine("s27", "s27")
-        b = bundle.debug_bundle(src.g, "FF5/D", depth=1)
+        # R33: the P4 compatibility path is gone; such a bundle is an error again.
+        b = bundle.debug_bundle(engine("s27", "s27").g, "FF5/D", depth=1)
         del b["instances"]
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "old.json")
             with open(path, "w") as f:
                 json.dump(b, f)
-            old = BundleSource(path)
-        self.assertIn("written before cells were stored", old.note)
-        # U10 is inside the depth-1 cone: all its pins. U9 is known only from path points
-        # (U9/A is three cell arcs back), so it shows just B and Y.
-        self.assertEqual(old.instance("U10"), {"cell": "NOR2", "sequential": False, "pins": [
-            {"name": "A", "direction": "input", "clock": False, "function": None},
-            {"name": "B", "direction": "input", "clock": False, "function": None},
-            {"name": "Y", "direction": "output", "clock": False, "function": None}]})
-        self.assertEqual([p["name"] for p in old.instance("U9")["pins"]], ["B", "Y"])
-        self.assertEqual([(p["name"], p["direction"], p["clock"]) for p in old.instance("FF5")["pins"]],
-                         [("CK", "input", True), ("D", "input", False)])
-        sch = model.schematic(old.paths("FF5/D")["setup"], old, ["U9/A"])
-        self.assertEqual([e["name"] for e in sch["elements"]][:8],
-                         ["G0", "U14", "U8", "U15", "U9", "U11", "U10", "FF5"])
+            with self.assertRaises(P2Error) as cm:
+                BundleSource(path)
+            self.assertEqual(str(cm.exception), "error: bundle has no instances: write it again with --bundle")
 
     def test_merges(self):
         src = engine("s27", "s27")
@@ -334,13 +323,6 @@ class ViewModelTests(unittest.TestCase):
                          [("-0.3000", "0.7000", 1), ("0.7000", "1.7000", 1), ("1.7000", "2.7000", 1)])
         self.assertEqual(model.histogram([None]), [])
 
-    def test_profile(self):
-        path = engine("s27", "s27").paths("FF5/D")["setup"]
-        bars = model.profile(path)
-        self.assertEqual([b["label"] for b in bars[:3]], ["input delay", "U14 INV A→Y", "U8 AND2 A→Y"])
-        self.assertEqual(fmt4(bars[4]["delay"]), "2.0120")
-        self.assertEqual(fmt4(sum(b["delay"] for b in bars)), fmt4(path["arrival"]))
-
     def test_path_table(self):
         src = engine("s27", "s27")
         pins = golden("s27", "pins.tsv")
@@ -357,6 +339,18 @@ class ViewModelTests(unittest.TestCase):
         flop = model.path_table(engine("ff2_default", "ff2").paths("FF2/D")["hold"], engine("ff2_default", "ff2"))
         self.assertEqual([r["label"] for r in flop[0]["rows"]], ["clock clk (rise edge)", "clock latency (ideal)", "FF1/CK"])
 
+    def test_path_table_largest(self):
+        # R33: the largest cell incr of the data path is marked (U10 NOR2 B->Y, 2.0120 in s27
+        # FF5/D setup); ties mark all (ff2_holdviol FF2/D hold: CK->Q 1.0 vs NAND 2.0 -> one).
+        rows = model.path_table(engine("s27", "s27").paths("FF5/D")["setup"], engine("s27", "s27"))[1]["rows"]
+        self.assertEqual([(r["label"], fmt4(r["incr"])) for r in rows if r["largest"]], [("U9/Y", "2.0120")])
+        path = copy.deepcopy(engine("s27", "s27").paths("FF5/D")["setup"])
+        for q in path["points"]:
+            if q["pin"] == "U14/Y":
+                q["incr"] = 2.0120 + 1e-10                 # a tie within 1e-9
+        rows = model.path_table(path, engine("s27", "s27"))[1]["rows"]
+        self.assertEqual([r["label"] for r in rows if r["largest"]], ["U14/Y", "U9/Y"])
+
     def test_waveform(self):
         src = engine("ff2_skew", "ff2")
         p = src.paths("FF2/D")
@@ -372,6 +366,29 @@ class ViewModelTests(unittest.TestCase):
         self.assertLessEqual(wave["span"][0], 0.0)
         setup_view = model.waveform(p["setup"], p["hold"], src.period, "setup")
         self.assertEqual(setup_view["rows"][0]["pin"], "x")
+
+    def test_waveform_edge_labels(self):
+        # R33: every rising edge in the span is labelled with its time; ff2_holdviol FF2/D:
+        # capture edges 3.5 and 13.5 (latency 3.5), never the falling edge 8.5.
+        src = engine("ff2_holdviol", "ff2")
+        p = src.paths("FF2/D")
+        for check in ("setup", "hold"):
+            rows = model.waveform(p["setup"], p["hold"], src.period, check)["rows"]
+            self.assertEqual([text for _, text, _ in rows[1]["labels"]], ["3.5000", "13.5000"])
+            self.assertEqual([text for _, text, _ in rows[0]["labels"]], ["0.0000", "10.0000"])
+        # With real widths (span 14.58 over 600 px, labels 48 px = 1.166 time units): 3.5 would
+        # cover the hold mark line at 3.6, so it goes left of its edge; 13.5 stays right of it
+        # (the setup line at 13.2 lies left of the edge).
+        wave = model.waveform(p["setup"], p["hold"], src.period, "hold", lambda text: 48, 600)
+        self.assertEqual(wave["rows"][1]["labels"], [(3.5, "3.5000", "e"), (13.5, "13.5000", "w")])
+        # Labels so wide that both sides of 3.5 hit a line or the span start: dropped.
+        wave = model.waveform(p["setup"], p["hold"], src.period, "hold", lambda text: 240, 600)
+        self.assertEqual([text for _, text, _ in wave["rows"][1]["labels"]], ["13.5000"])
+        self.assertEqual([text for _, text, _ in wave["rows"][0]["labels"]], ["0.0000", "10.0000"])
+
+    def test_near_critical(self):
+        # R33: 1 % of the clock period (was the constant 0.05).
+        self.assertEqual(fmt4(model.near_critical(engine("s27", "s27").period)), "0.1000")
 
 
 class ThemeTests(unittest.TestCase):
@@ -416,6 +433,12 @@ class ViewerCliTests(unittest.TestCase):
             with open(bad, "w") as f:
                 f.write("{not json")
             self.assertError(run_viewer("--bundle", bad), "error: %s is not JSON" % bad)
+            old = os.path.join(tmp, "old.json")         # R33: written before instances existed
+            b = bundle.debug_bundle(engine("ff2_default", "ff2").g, "FF2/D", depth=1)
+            del b["instances"]
+            with open(old, "w") as f:
+                json.dump(b, f)
+            self.assertError(run_viewer("--bundle", old), "error: bundle has no instances: write it again with --bundle")
             missing = os.path.join(tmp, "nope.lib")
             self.assertError(run_viewer("--lib", missing, "--verilog", FF2_V, "--sdc", sdc("ff2_default")),
                              "ERROR %s: cannot read file: No such file or directory" % missing)
@@ -467,9 +490,10 @@ class TkSmokeTests(unittest.TestCase):
             app.select_endpoint("FF5/D")
             self.assertIn("1.1373", self.texts(app.summary_cv))
             self.assertIn("9.8222", self.texts(app.summary_cv))       # required in the formula
-            for tab in ("schematic", "waveform", "profile"):
+            for tab in ("schematic", "waveform"):
                 app.set_tab(tab)
                 self.assertTrue(app.view.find_all(), tab)
+            self.assertEqual(app.root.bind("<Key-3>"), "")             # R33: 3 is reserved
             app.set_tab("schematic")
             app.expand("U9/A")
             app.set_check("hold")
@@ -481,6 +505,7 @@ class TkSmokeTests(unittest.TestCase):
             insp = self.texts(app.insp)
             self.assertIn("U9/Y", insp)
             self.assertTrue(any("U9/A" in t for t in insp))     # the losing input of the merge
+            self.assertIn("near-critical: margin < 0.1000", insp)  # R33: 1 % of the period
             app.select_cell("U9")
             self.assertTrue(any("NAND2" in t for t in self.texts(app.insp)))
             app.filter_bin(0)
@@ -519,7 +544,7 @@ class TkSmokeTests(unittest.TestCase):
                 app.set_check(check)
                 for stub in [s["pin"] for s in app.layout["stubs"] if s["state"] == "expand"] if app.layout else []:
                     app.expand(stub)
-                for tab in ("schematic", "waveform", "profile"):
+                for tab in ("schematic", "waveform"):
                     app.set_tab(tab)
                     for k in range(len(app.path()["points"])) if app.path() else [None]:
                         if k is not None:

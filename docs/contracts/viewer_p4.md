@@ -199,7 +199,7 @@ fixed minimum of 1200x760, larger than a 1280x800 or 1440x900 laptop screen.
   time order) or, on the capture clock row, which the dashed mark lines cross, a mark's
   required time strictly inside its interval. `width` = `text_width(text)` pixels
   converted to time units over `axis_px` pixels for the span; without `text_width` labels
-  have width 0. Edge `t` of a row starts at its first edge and repeats every period.
+  have width 0. A row's rising edges are its first edge plus any whole number of periods.
   `ff2_holdviol` `FF2/D`: the capture labels are `3.5000` and `13.5000`.
 - Near-critical threshold in the inspector merges: a margin under 1 % of the clock period
   (`model.near_critical(period)`, compared with 1e-9 tolerance) instead of the constant
