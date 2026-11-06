@@ -217,3 +217,12 @@ removal / min_pulse_width / clear / preset arcs on every flop; refusing them
 made every real library unusable, while ignoring them leaves every value of
 the supported arcs unchanged (the eight goldens prove it). A missing or
 non-2-D table of a supported group is still an error.
+
+2026-11-05 (W2, R37). The "Units" paragraph at the top ("no conversion
+anywhere") is replaced by `cli_p5.md` "Library units": every library declares
+`time_unit` and `capacitive_load_unit`; the first `--lib` is the main
+library, every other library is converted to its units when loaded, and all
+times and capacitances of §1–§11, the SDC values and every output are in the
+main library's units. For `toy2.lib` alone (ns, pF) nothing changes. Why: a
+real flow mixes libraries characterized in ps / fF with ones in ns / pF, and
+an unconverted mix gives values that are wrong by 1000 without any error.

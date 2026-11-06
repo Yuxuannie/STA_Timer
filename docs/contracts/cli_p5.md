@@ -43,6 +43,31 @@ warning: <n> timing arcs ignored (run --check-timing)
 given). A run that ignored nothing prints nothing on stderr. No warning is printed for
 lookups outside a table grid; those appear only in `--check-timing`.
 
+## Library units (R37)
+
+- The **main library** is the first `--lib`. Every library must declare `time_unit`
+  (`"<number><unit>"`, unit `fs`, `ps`, `ns`, `us`, `ms` or `s`) and
+  `capacitive_load_unit` (`(<number>, <unit>)`, unit `ff`, `pf`, `nf`, `uf`, `mf` or
+  `f`, any case). A library without one of them is an error when it is loaded:
+  `<file>: library <name>: missing time_unit` (or `missing capacitive_load_unit`), one
+  stderr line, exit 1. An unknown unit is `<file>: library <name>: unknown time_unit
+  <value>` (or `unknown capacitive_load_unit <value>`). Libraries are loaded and
+  checked one after the other in command-line order, so this error takes its place
+  among the other errors of the same library: after its parse errors, before anything
+  of the next `--lib`.
+- A library whose units differ from the main library's is converted to the main
+  library's units when it is loaded, on the built cells only (the generic Liberty tree
+  is left as read): times by `own time unit / main time unit` — the values of every
+  delay, transition and constraint table and the table axes whose template variable
+  ends in `_transition`; capacitances by `own cap unit / main cap unit` — pin
+  `capacitance`, `rise_capacitance`, `fall_capacitance` and the table axes whose
+  variable ends in `_capacitance`.
+- SDC numbers are in the main library's units (times in its `time_unit`, `set_load` in
+  its `capacitive_load_unit`). JSON `units` are the main library's. Every output is in
+  the main library's units.
+- Cells repeated across libraries: the first library that defines a cell still wins
+  (`cli_p2.md`); conversion does not change that.
+
 ## Errors
 
 The error contract of `cli_p2.md` is unchanged: one stderr line, exit 1, no usage text,
