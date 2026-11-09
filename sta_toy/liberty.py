@@ -40,8 +40,9 @@ def parse_file(path):
 
 
 def parse(text, filename):
-    """Parse Liberty text into its single top-level group."""
-    p = _Parser(list(_tokenize(text, filename)), filename)
+    """Parse Liberty text into its single top-level group. Tokens are read as the parser needs
+    them (R45): the first error in file order is the one reported, and nothing after it is read."""
+    p = _Parser(_tokenize(text, filename), filename)
     holder = Group("", [], 0)
     first = p.peek()
     p.statement(holder)
@@ -111,10 +112,19 @@ def _describe(group):
     return "%s (%s)" % (group.header, ", ".join(group.names))
 
 
+# R44: binary operators that join values written apart (`0.7 * VDD`), as in OpenSTA's grammar.
+_OPERATORS = ("+", "-", "*", "/", "&", "|", "^")
+
+
 class _Parser:
+    """The statement grammar of OpenSTA's LibertyParse.yy (R44): semicolons are optional and
+    may repeat, after a group's '}' too; list values are separated by commas or by spaces
+    alone; values joined by spaced binary operators are one value. Not supported: OpenSTA's
+    `name = number` variables, and parentheses inside a value."""
+
     def __init__(self, tokens, filename):
         self.tokens = tokens
-        self.pos = 0
+        self.tok = None             # the next token, read from `tokens` only when needed
         self.filename = filename
         self.open_groups = []
 
@@ -126,38 +136,44 @@ class _Parser:
         raise StaError(self.filename, tok[2], message)
 
     def peek(self):
-        return self.tokens[self.pos]
+        if self.tok is None:
+            self.tok = next(self.tokens)
+        return self.tok
 
     def next(self):
-        tok = self.tokens[self.pos]
+        tok = self.peek()
         if tok[0] != "eof":
-            self.pos += 1
+            self.tok = None
         return tok
 
-    def expect(self, kind):
-        tok = self.next()
-        if tok[0] != kind:
-            self.error(tok, "expected '%s', found %s" % (kind, _show(tok)))
-        return tok
-
-    def value(self):
+    def term(self):
         tok = self.next()
         if tok[0] not in ("word", "str"):
             self.error(tok, "expected a value, found %s" % _show(tok))
         return tok[1]
 
+    def value(self):
+        """One value; `0.7 * VDD` is the value "0.7*VDD", joined as OpenSTA joins it."""
+        text = self.term()
+        while self.peek()[0] == "word" and self.peek()[1] in _OPERATORS:
+            text += self.next()[1] + self.term()
+        return text
+
     def value_list(self):
-        """Comma-separated values up to and including the closing ')'."""
+        """Values up to and including the closing ')', separated by commas or by spaces."""
         values = []
         if self.peek()[0] == ")":
             self.next()
             return values
         while True:
             values.append(self.value())
-            tok = self.next()
+            tok = self.peek()
             if tok[0] == ")":
+                self.next()
                 return values
-            if tok[0] != ",":
+            if tok[0] == ",":
+                self.next()
+            elif tok[0] not in ("word", "str"):
                 self.error(tok, "expected ',' or ')', found %s" % _show(tok))
 
     def statement(self, parent):
@@ -166,23 +182,20 @@ class _Parser:
             self.error(name, "expected a name, found %s" % _show(name))
         tok = self.next()
         if tok[0] == ":":
-            value = self.value()
-            self.expect(";")
-            parent.attrs.append(Attr(name[1], [value], name[2]))
+            parent.attrs.append(Attr(name[1], [self.value()], name[2]))
         elif tok[0] == "(":
             values = self.value_list()
-            tok = self.next()
-            if tok[0] == "{":
+            if self.peek()[0] == "{":
+                self.next()
                 group = Group(name[1], values, name[2])
                 self.body(group)
                 parent.groups.append(group)
-            elif tok[0] == ";":
-                parent.attrs.append(Attr(name[1], values, name[2]))
             else:
-                self.error(tok, "expected '{' or ';' after %s (...), found %s"
-                           % (name[1], _show(tok)))
+                parent.attrs.append(Attr(name[1], values, name[2]))
         else:
             self.error(tok, "expected ':' or '(' after %s, found %s" % (name[1], _show(tok)))
+        while self.peek()[0] == ";":
+            self.next()
 
     def body(self, group):
         self.open_groups.append(group)
@@ -259,13 +272,24 @@ class Cell:
 
 class Library:
     """`time_unit` is the attribute's text ("1ns"), `cap_unit` (value, unit) or None when
-    the library does not declare it (R37: an error at design load, not here)."""
+    the library does not declare it (R37: an error at design load, not here).
+    `cells` holds the built cells, `unbuilt` maps the name of every other cell to its group
+    (R46)."""
 
-    def __init__(self, name, cap_unit, cells, time_unit=None):
+    def __init__(self, name, cap_unit, cells, time_unit=None, unbuilt=None, build_cell=None):
         self.name = name
         self.cap_unit = cap_unit
         self.cells = cells
         self.time_unit = time_unit
+        self.unbuilt = unbuilt or {}
+        self._build_cell = build_cell
+
+    def build(self, names=None):
+        """Build the unbuilt cells named in `names` (all of them when None), in file order;
+        names the library does not have are skipped. A cell is checked when it is built, so a
+        cell that is never built is never an error (R46)."""
+        for name in [n for n in self.unbuilt if names is None or n in names]:
+            self.cells[name] = self._build_cell(self.unbuilt.pop(name))
 
 
 # R37 (cli_p5.md "Library units"): unit names as exact powers of ten (of s and F).
@@ -300,8 +324,8 @@ def _scaled(values, factor):
 
 def convert(lib, time_factor, cap_factor):
     """Scale the built cells of `lib` in place: times by time_factor, capacitances by
-    cap_factor (cli_p5.md). The generic tree is not touched; shared template index lists
-    are replaced, never modified."""
+    cap_factor (cli_p5.md); a cell built afterwards is not scaled. The generic tree is not
+    touched; shared template index lists are replaced, never modified."""
     for cell in lib.cells.values():
         for pin in cell.pins:
             for name in ("capacitance", "rise_capacitance", "fall_capacitance"):
@@ -318,12 +342,16 @@ def convert(lib, time_factor, cap_factor):
                             setattr(table, attr, _scaled(getattr(table, attr), cap_factor))
 
 
-def load(path):
-    return loads(read_file(path), path)
+def load(path, cells=None):
+    return loads(read_file(path), path, cells)
 
 
-def loads(text, filename):
-    return _Builder(filename).library(parse(text, filename))
+def loads(text, filename, cells=None):
+    """The library of `text` with the cells named in `cells` built (all when None); the
+    others can be built later with Library.build (R46)."""
+    lib = _Builder(filename).library(parse(text, filename))
+    lib.build(cells)
+    return lib
 
 
 class _Builder:
@@ -381,17 +409,20 @@ class _Builder:
                               for a in g.find_attrs(n)[:1])
             templates[tname] = (self.index(g, "index_1", ctx, None),
                                 self.index(g, "index_2", ctx, None), variables)
-        cells = {}
+        unbuilt = {}
         for g in root.find_groups("cell"):
-            cell = self.cell(g, templates)
-            cells[cell.name] = cell
-        return Library(name, cap_unit, cells, self.text(root, "time_unit", None))
+            unbuilt[self.names(g)[0]] = g
+        return Library(name, cap_unit, {}, self.text(root, "time_unit", None), unbuilt,
+                       lambda g: self.cell(g, templates))
 
     def cell(self, group, templates):
         name = self.names(group)[0]
-        pin_names = [n for g in group.find_groups("pin") for n in self.names(g)]
+        # R46: an internal pin (the state node of a clock gating cell) is not a pin of the cell.
+        pin_groups = [g for g in group.find_groups("pin")
+                      if self.text(g, "direction", None) != "internal"]
+        pin_names = [n for g in pin_groups for n in self.names(g)]
         pins = [self.pin(g, pin_name, "cell %s pin %s" % (name, pin_name), templates, pin_names)
-                for g in group.find_groups("pin") for pin_name in g.names]
+                for g in pin_groups for pin_name in g.names]
         sequential = bool(group.find_groups("ff") or group.find_groups("latch"))
         return Cell(name, pins, group.line, self.filename, sequential)
 
