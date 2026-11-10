@@ -40,13 +40,15 @@ def _check(x):
     if x["ck"] is None:
         if x["kind"] == "setup":
             return [head + "period %s - output_delay %s" % (fmt4(x["period"]), fmt4(x["output_delay"]))]
-        return [head + "0.0000 - output_delay %s" % fmt4(x["output_delay"])]
+        return [head + "%s - output_delay %s" % (fmt4(x["edge"]), fmt4(x["output_delay"]))]
     if x["kind"] == "setup":
         terms = "ck_at %s + period %s - t %s - uncertainty %s" % (
             fmt4(x["ck_at"]), fmt4(x["period"]), fmt4(x["t"]), fmt4(x["uncertainty"]))
     else:
-        terms = "ck_at %s + t %s + uncertainty %s" % (
-            fmt4(x["ck_at"]), fmt4(x["t"]), fmt4(x["uncertainty"]))
+        # R51: a hold edge other than 0 (clocks of different periods) is shown.
+        edge = " + edge %s" % fmt4(x["edge"]) if x["edge"] else ""
+        terms = "ck_at %s%s + t %s + uncertainty %s" % (
+            fmt4(x["ck_at"]), edge, fmt4(x["t"]), fmt4(x["uncertainty"]))
     return [head + terms + "; t at d_slew %s ck_slew %s (%s)"
             % (fmt4(x["d_slew"]), fmt4(x["ck_slew"]), x["ck"])]
 

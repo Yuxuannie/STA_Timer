@@ -1,12 +1,13 @@
-"""Gate-level Verilog: one flat module with scalar nets and named connections (R3)."""
+"""Gate-level Verilog: one flat module with scalar nets and named connections (R3), plus
+`assign` between nets and implicit nets (R48)."""
 
 import re
 
 from sta_toy import StaError, read_file
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
-_PUNCT = "(),;."
-_KEYWORDS = ("module", "endmodule", "input", "output", "wire")
+_PUNCT = "(),;.="
+_KEYWORDS = ("module", "endmodule", "input", "output", "wire", "assign")
 
 
 class Conn:
@@ -29,7 +30,9 @@ class Instance:
 
 
 class Netlist:
-    """Ports in header order, declarations in file order; decl_lines maps a net to its first declaration line."""
+    """Ports in header order, declarations in file order; decl_lines maps a net to its first declaration line.
+    `aliases` maps a name that an `assign` merged into another net to that net's name (R48);
+    connections already use the net's name, ports go through net()."""
 
     def __init__(self, file, name, ports):
         self.file = file
@@ -40,6 +43,10 @@ class Netlist:
         self.wires = []
         self.decl_lines = {}
         self.instances = []
+        self.aliases = {}
+
+    def net(self, name):
+        return self.aliases.get(name, name)
 
 
 def load(path):
@@ -136,9 +143,16 @@ class _Parser:
         self.expect(")")
         self.expect(";")
         net = Netlist(self.filename, name, [t[1] for t in port_toks])
+        assigns = []
         while self.peek()[:2] != ("id", "endmodule"):
             if self.peek()[0] == "id" and self.peek()[1] in ("input", "output", "wire"):
                 self.declaration(net)
+            elif self.peek()[:2] == ("id", "assign"):
+                self.next()
+                lhs = self.net_name(net)
+                self.expect("=")
+                assigns.append((lhs, self.net_name(net)))
+                self.expect(";")
             else:
                 self.instance(net)
         self.next()
@@ -147,6 +161,7 @@ class _Parser:
         for tok in port_toks:
             if tok[1] not in net.inputs and tok[1] not in net.outputs:
                 self.error(tok, "port %s has no input/output declaration" % tok[1])
+        _merge(net, assigns)
         return net
 
     def declaration(self, net):
@@ -190,15 +205,10 @@ class _Parser:
             if any(c.pin == pin for c in conns):
                 self.error(dot, "pin %s of instance %s is connected twice" % (pin, name[1]))
             self.expect("(")
-            tok = self.next()
-            if tok[0] == ")":
-                self.error(tok, "empty connection .%s() in instance %s" % (pin, name[1]))
-            if tok[0] != "id" or tok[1] in _KEYWORDS:
-                self.error(tok, "expected a net name, found %s" % _show(tok))
-            if tok[1] not in self.kinds:
-                self.error(tok, "net %s is not a declared port or wire" % tok[1])
+            if self.peek()[0] == ")":
+                self.error(self.peek(), "empty connection .%s() in instance %s" % (pin, name[1]))
+            conns.append(Conn(pin, self.net_name(net), dot[2]))
             self.expect(")")
-            conns.append(Conn(pin, tok[1], dot[2]))
             sep = self.next()
             if sep[0] == ")":
                 break
@@ -206,3 +216,35 @@ class _Parser:
                 self.error(sep, "expected ',' or ')', found %s" % _show(sep))
         self.expect(";")
         net.instances.append(Instance(cell[1], name[1], cell[2], conns))
+
+    def net_name(self, net):
+        """A net in a connection or an assign; an undeclared name is an implicit wire,
+        declared where it is first used (R48)."""
+        tok = self.next()
+        if tok[0] != "id" or tok[1] in _KEYWORDS:
+            self.error(tok, "expected a net name, found %s" % _show(tok))
+        if tok[1] not in self.kinds:
+            self.declare(net, "wire", tok)
+        return tok[1]
+
+
+def _merge(net, assigns):
+    """R48: `assign a = b;` makes a and b one net. It is named after its first port in
+    header order, else after its first declared name; connections are renamed to it."""
+    root = {}
+
+    def find(name):
+        while root.get(name, name) != name:
+            name = root[name]
+        return name
+    order = {name: (name not in net.ports, net.ports.index(name) if name in net.ports else i)
+             for i, name in enumerate(net.decl_lines)}
+    for a, b in assigns:
+        a, b = find(a), find(b)
+        if a != b:
+            keep, drop = sorted((a, b), key=order.get)
+            root[drop] = keep
+    net.aliases = {name: find(name) for name in root}
+    for inst in net.instances:
+        for conn in inst.conns:
+            conn.net = net.net(conn.net)

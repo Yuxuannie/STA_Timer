@@ -93,7 +93,7 @@ def link(netlist, lib):
     # Drivers and loads per net; loads in instance order, lib pin order, then PO ports.
     drivers, loads = {}, {}
     for name in netlist.inputs:
-        drivers.setdefault(name, []).append(name)
+        drivers.setdefault(netlist.net(name), []).append(name)
     for inst, cell in zip(netlist.instances, cells):
         nets = {conn.pin: conn.net for conn in inst.conns}
         for pin in cell.pins:
@@ -101,7 +101,7 @@ def link(netlist, lib):
                 side = drivers if pin.direction == "output" else loads
                 side.setdefault(nets[pin.name], []).append(inst.name + "/" + pin.name)
     for name in netlist.outputs:
-        loads.setdefault(name, []).append(name)
+        loads.setdefault(netlist.net(name), []).append(name)
 
     # Every port is in drivers or loads; a wire only if it is connected.
     for net, line in netlist.decl_lines.items():

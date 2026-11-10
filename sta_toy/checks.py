@@ -28,7 +28,7 @@ def report(g, grid):
     """The check_timing.md text."""
     sdc, netlist = g.sdc, g.netlist
     unclocked = _unclocked(g)
-    inputs = [p for p in netlist.inputs if p != sdc.clock_port]
+    inputs = [p for p in netlist.inputs if p not in {c.port for c in sdc.clocks.values()}]
     sections = []
     ends = [p for p in netlist.outputs if p not in sdc.output_delay]
     ends += [n.name for n in g.nodes

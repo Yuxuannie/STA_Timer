@@ -62,17 +62,19 @@ def _delay(arc):
 
 
 def _check_values(e, c, sdc):
-    """t_su / t_h of report_p3.md §4 per D transition, for the check arc's own kind."""
+    """t_su / t_h of report_p3.md §4 per D transition, for the check arc's own kind, against
+    the endpoint's capture clock (R51)."""
     out = {"setup": {"r": None, "f": None}, "hold": {"r": None, "f": None}}
+    u, edges = e.capture_clock.uncertainty, e.capture_edges
     for rf in ("r", "f"):
         if c.kind == "setup":
             rat, at = e.rat["late"][rf], c.ck.at["late"]["r"]
             if rat is not None and at is not None:
-                out["setup"][rf] = num((at + sdc.period - sdc.uncertainty["setup"]) - rat)
+                out["setup"][rf] = num((at + edges["setup"] - u["setup"]) - rat)
         else:
             rat, at = e.rat["early"][rf], c.ck.at["early"]["r"]
             if rat is not None and at is not None:
-                out["hold"][rf] = num(rat - (at + sdc.uncertainty["hold"]))
+                out["hold"][rf] = num(rat - (at + edges["hold"] + u["hold"]))
     return out
 
 
@@ -113,7 +115,7 @@ def debug_bundle(g, endpoint_name, depth=3, max_nodes=300):
                           "function": q.function} for q in g.lib.cells[cell].pins]}
     return {"schema": "sta_toy.bundle/1", "endpoint": e.name, "depth": depth,
             "max_nodes": max_nodes, "truncated": len(order) > max_nodes,
-            "clock": {"name": g.sdc.clock_name, "period": num(g.sdc.period)},
+            "clock": {"name": e.capture_clock.name, "period": num(e.capture_clock.period)},
             "nodes": [_node(n, cone[n]) for n in order[:max_nodes]],
             "edges": edges,
             "instances": dict(sorted(instances.items())),

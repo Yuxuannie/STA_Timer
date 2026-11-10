@@ -22,7 +22,7 @@ def _line(name, incr="", path="", rf="", cap=None, trans=None):
 
 def format_path(p, transition=False, capacitance=False):
     """One report block (report_p3.md §4) from a path object; ends with "\\n"."""
-    clk = p["capture_clock"]
+    clk, launch_clk = p["capture_clock"], p["launch_clock"]
     launch, cap = p["launch"], p["capture"]
     empty = {"cap": "" if capacitance else None, "trans": "" if transition else None}
 
@@ -34,16 +34,18 @@ def format_path(p, transition=False, capacitance=False):
                    trans="Trans" if transition else None)
     sep = "-" * len(header)
     pi_start = launch["input_delay"] is not None
-    lines = ["Startpoint: %s (%s)" % (p["start"], (SOURCE_KIND if pi_start else FLOP_KIND) % clk),
+    lines = ["Startpoint: %s (%s)" % (p["start"],
+                                     (SOURCE_KIND if pi_start else FLOP_KIND) % launch_clk),
              "Endpoint: %s (%s)" % (p["end"], (FLOP_KIND if cap["pin"] else PO_KIND) % clk),
              "Path Group: %s" % clk,
              "Path Type: %s" % p["type"],
              "", header, sep,
-             row("clock %s (rise edge)" % p["launch_clock"], 0.0, 0.0)]
+             row("clock %s (rise edge)" % launch_clk, launch["clock_edge"], launch["clock_edge"])]
     if pi_start:
         lines.append(row("input external delay", launch["input_delay"], launch["input_delay"]))
     else:
-        lines.append(row("clock network delay (ideal)", launch["latency"], launch["latency"]))
+        lines.append(row("clock network delay (%s)" % launch.get("network", "ideal"),
+                         launch["latency"], launch["latency"]))
 
     for i, q in enumerate(p["points"]):
         if q["cell"] is not None:
@@ -60,7 +62,8 @@ def format_path(p, transition=False, capacitance=False):
     if cap["pin"]:
         sign = -1.0 if p["check"] == "setup" else 1.0
         at_pin = edge + cap["latency"] + sign * cap["uncertainty"]
-        lines += [row("clock network delay (ideal)", cap["latency"], edge + cap["latency"]),
+        lines += [row("clock network delay (%s)" % cap.get("network", "ideal"),
+                      cap["latency"], edge + cap["latency"]),
                   row("clock uncertainty", sign * cap["uncertainty"], at_pin),
                   row("%s (%s)" % (cap["pin"], cap["cell"]), path=at_pin, rf="r"),
                   row("library %s time" % p["check"], sign * cap["check"], p["required"])]

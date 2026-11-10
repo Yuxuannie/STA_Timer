@@ -1,0 +1,13 @@
+# clk2: two clocks of the same period, ideal (R50, R51).
+create_clock -name clk_a -period 10.0 [get_ports clk_a]
+create_clock -name clk_b -period 10.0 [get_ports clk_b]
+set_clock_transition 0.05 [get_clocks clk_a]
+set_clock_transition 0.05 [get_clocks clk_b]
+set_input_delay 0.5 -clock clk_a [get_ports din0]
+set_input_delay 0.5 -clock clk_a [get_ports din1]
+set_input_transition 0.05 [get_ports din0]
+set_input_transition 0.05 [get_ports din1]
+set_output_delay 0.5 -clock clk_a [get_ports dout0]
+set_output_delay 0.5 -clock clk_b [get_ports dout1]
+set_load 0.004 [get_ports dout0]
+set_load 0.004 [get_ports dout1]

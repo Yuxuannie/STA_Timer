@@ -15,13 +15,16 @@ def units(lib):
     return {"time": lib.time_unit, "cap": "{:g}{}".format(value, unit)}
 
 
-def _clock(sdc):
-    return {"name": sdc.clock_name, "period": num(sdc.period), "port": sdc.clock_port,
-            "latency": num(sdc.clock_latency),
-            "pin_latency": {pin: num(v) for pin, v in sorted(sdc.pin_latency.items())},
-            "transition": num(sdc.clock_transition),
-            "uncertainty": {"setup": num(sdc.uncertainty["setup"]),
-                            "hold": num(sdc.uncertainty["hold"])}}
+def _clock(g, clock):
+    """One clock (R51: one per create_clock); pin_latency lists the CK pins it clocks."""
+    pins = {n.name for n in g.nodes if n.kind == "CK" and n.launch_clock is clock}
+    return {"name": clock.name, "period": num(clock.period), "port": clock.port,
+            "latency": num(clock.latency),
+            "pin_latency": {pin: num(v) for pin, v in sorted(g.sdc.pin_latency.items())
+                            if pin in pins},
+            "transition": num(clock.transition),
+            "uncertainty": {"setup": num(clock.uncertainty["setup"]),
+                            "hold": num(clock.uncertainty["hold"])}}
 
 
 def _check(e, check):
@@ -44,12 +47,13 @@ def report_json(g, design_info):
             if path is not None:
                 ids[check] = "p%d" % (len(objs) + 1)
                 objs.append(paths.path_json(path, g.sdc, ids[check]))
-        endpoints.append({"pin": e.name, "kind": e.kind, "clock": g.sdc.clock_name,
+        endpoints.append({"pin": e.name, "kind": e.kind, "clock": e.capture_clock.name,
                           "setup": _check(e, "setup"), "hold": _check(e, "hold"),
                           "worst_path": ids})
     summary = {check: {"wns": num(s["wns"]), "tns": num(s["tns"]), "nvp": s["nvp"]}
                for check, s in paths.summary(g).items()}
-    return {"schema": SCHEMA, "design": design_info, "clocks": [_clock(g.sdc)],
+    return {"schema": SCHEMA, "design": design_info,
+            "clocks": [_clock(g, c) for c in g.sdc.clocks.values()],
             "summary": summary, "endpoints": endpoints, "paths": objs}
 
 

@@ -1,6 +1,9 @@
 """Stage P2 timer (p2_semantics.md). R12: the timing graph; R13: the SDC checks against the
 design; R14: the clock model; R15: forward propagation; R16: endpoint checks;
-R17: backward propagation; R18: slack, worst transition and paths."""
+R17: backward propagation; R18: slack, worst transition and paths. R50: clock networks
+through cells, ideal or propagated; R51: several clocks."""
+
+from fractions import Fraction
 
 from sta_toy import P2Error, lookup
 
@@ -31,13 +34,19 @@ class Node:
     """kind is 'clock_port', 'PI', 'PO', 'CK', 'D' or 'other'. `cap` is what the node adds
     to the load of the net it sits on (pin capacitance, or set_load for an output port);
     `load` is LOAD() of the net it drives. `cell` is the cell name of an instance pin
-    (None for a port)."""
+    (None for a port). `clock` is the Clock whose network holds the node (R50);
+    `launch_clock` the clock that launches from a PI or CK node, `capture_clock` and
+    `capture_edges` ({"setup": t, "hold": t}) those an endpoint checks against (R51)."""
 
     def __init__(self, name, kind, cap, cell=None):
         self.name = name
         self.kind = kind
         self.cap = cap
         self.cell = cell
+        self.clock = None
+        self.launch_clock = None
+        self.capture_clock = None
+        self.capture_edges = None
         self.load = 0.0
         self.fanin = []
         self.fanout = []
@@ -72,7 +81,8 @@ class Check:
 
 class TimingGraph:
     """`ignored` counts the timing() arcs build() skipped, per (cell, pin, related_pin,
-    type); `clocked` is the set of CK nodes on the clock port's net (check_timing.md)."""
+    type); `clocked` maps each CK node a clock's network reaches to that Clock (R50;
+    check_timing.md)."""
 
     def __init__(self):
         self.nodes = []
@@ -80,7 +90,7 @@ class TimingGraph:
         self.endpoints = []
         self.sdc = None
         self.ignored = {}
-        self.clocked = set()
+        self.clocked = {}
 
     def add_arc(self, src, dst, pairs, tables, kind):
         arc = Arc(src, dst, pairs, tables, kind)
@@ -108,13 +118,16 @@ def _table(timing, kind, variables, fail):
     return table
 
 
-def build(linked, netlist, lib, clock_port, port_loads):
+def build(linked, netlist, lib, sdc):
     """Timing graph of a linked stage 1 design (§1-§3). Only the stage 1 net edges are
-    reused; cell arcs come from the timing() groups, and the clock net is left out."""
+    reused; cell arcs come from the timing() groups. R50: the clock networks are traced
+    afterwards; an ideal one keeps none of its arcs, as P2 left the clock net out."""
+    clock_ports = {c.port for c in sdc.clocks.values()}
+    port_loads = sdc.load
     g = TimingGraph()
     for n in linked.nodes:
         if n.kind in ("PI", "PO"):
-            kind = "clock_port" if n.name == clock_port else n.kind
+            kind = "clock_port" if n.name in clock_ports else n.kind
             cap = port_loads.get(n.name, 0.0) if n.kind == "PO" else None
         else:
             pin = lib.cells[n.cell].pin(n.name.split("/")[1])
@@ -127,14 +140,6 @@ def build(linked, netlist, lib, clock_port, port_loads):
     for n in linked.nodes:
         driver = g.by_name[n.name]
         sinks = [g.by_name[e.dst] for e in n.edges if e.kind == "net"]
-        if driver.kind == "clock_port":
-            for sink in sinks:
-                if sink.kind != "CK":
-                    raise P2Error(netlist.file, _connection_line(netlist, sink.name),
-                                  "clock port %s drives a non-clock pin %s"
-                                  % (driver.name, sink.name))
-            g.clocked.update(sinks)
-            continue
         driver.load = sum(s.cap for s in sinks)
         for sink in sinks:
             g.add_arc(driver, sink, (("r", "r"), ("f", "f")), None, "net")
@@ -175,7 +180,60 @@ def build(linked, netlist, lib, clock_port, port_loads):
                 kind = "ckq" if timing.timing_type == "rising_edge" else "cell"
                 for src in srcs:
                     g.add_arc(src, dst, pairs, tables, kind)
+    networks = [(clock, _trace_clock(g, clock, netlist)) for clock in sdc.clocks.values()]
+    for clock, network in networks:
+        _keep_own_arcs(clock, network)
     return g
+
+
+def _drop(arc):
+    arc.src.fanout.remove(arc)
+    arc.dst.fanin.remove(arc)
+
+
+def _trace_clock(g, clock, netlist):
+    """R50: the network of `clock`: every node its port reaches over net edges and cell
+    arcs, stopping at clock pins (CK). Reaching a data pin or an output port, a node of
+    another clock's network, or a cell arc that is not positive unate is an error."""
+
+    def error(node, message):
+        raise P2Error(netlist.file, _connection_line(netlist, node.name),
+                      "clock %s %s" % (clock.name, message))
+
+    port = g.by_name[clock.port]
+    port.clock = clock
+    network = [port]
+    for u in network:
+        if u.kind == "CK" and u is not port:
+            g.clocked[u] = clock
+            continue
+        for arc in u.fanout:
+            v = arc.dst
+            if arc.kind != "net" and arc.pairs != SENSE_PAIRS["positive_unate"]:
+                error(v, "goes through %s -> %s, which is not positive unate (not supported yet)"
+                      % (u.name, v.name))
+            if v.kind in ("D", "PO"):
+                error(v, "reaches the data pin %s" % v.name)
+            if v.clock is clock:
+                continue
+            if v.clock is not None:
+                error(v, "and clock %s both reach %s" % (v.clock.name, v.name))
+            v.clock = clock
+            network.append(v)
+    return network
+
+
+def _keep_own_arcs(clock, network):
+    """R50, once every network is traced: an ideal network keeps no arc (its CK pins are
+    sources), a propagated one only the arcs between its own nodes."""
+    inner = [n for n in network if n.kind != "CK"]
+    for n in inner:
+        for arc in list(n.fanin):
+            if not clock.propagated or arc.src.clock is not clock:
+                _drop(arc)
+        if not clock.propagated:
+            for arc in list(n.fanout):
+                _drop(arc)
 
 
 def check_sdc(sdc, netlist, lib):
@@ -184,8 +242,9 @@ def check_sdc(sdc, netlist, lib):
     def error(line, message):
         raise P2Error(sdc.file, line, message)
 
-    if sdc.clock_name is None:
+    if not sdc.clocks:
         error(sdc.last_line, "no create_clock in the file")
+    clock_ports = {c.port for c in sdc.clocks.values()}
     pins, clock_pins = set(), set()
     for inst in netlist.instances:
         for pin in lib.cells[inst.cell].pins:
@@ -195,8 +254,10 @@ def check_sdc(sdc, netlist, lib):
     inputs, outputs = set(netlist.inputs), set(netlist.outputs)
     for line, cmd, kind, name in sdc.objects:
         if kind == "get_clocks":
-            if name != sdc.clock_name:
+            if name not in sdc.clocks:
                 error(line, "clock %s does not exist" % name)
+            if sdc.clocks[name].line > line:
+                error(line, "clock %s is named before its create_clock" % name)
         elif kind == "get_pins":
             if name not in pins:
                 error(line, "pin %s does not exist" % name)
@@ -206,8 +267,9 @@ def check_sdc(sdc, netlist, lib):
             error(line, "port %s does not exist" % name)
         elif cmd == "create_clock" and name in outputs:
             error(line, "create_clock on output port %s" % name)
-        elif (cmd in ("set_input_delay", "set_input_transition", "set_load")
-              and name == sdc.clock_port):
+        elif cmd in ("set_input_delay", "set_load") and name in clock_ports:
+            # set_input_transition on a clock port is allowed: the source slew of a
+            # propagated clock (R50).
             error(line, "%s on the clock port %s" % (cmd, name))
         elif cmd in ("set_input_delay", "set_input_transition") and name in outputs:
             error(line, "%s on output port %s" % (cmd, name))
@@ -220,12 +282,13 @@ def run(linked, netlist, lib, sdc, grid=None, log=None):
     `grid`, if a list, receives every lookup of forward, check and backward
     (check_timing.md §7); `log`, if a list, the engine log of trace.md."""
     check_sdc(sdc, netlist, lib)
-    g = build(linked, netlist, lib, sdc.clock_port, sdc.load)
+    g = build(linked, netlist, lib, sdc)
     g.sdc = sdc
     order = topological_order(g)
     set_sources(g, sdc, log)
     forward(g, order, log, grid)
-    g.endpoints = check(g, sdc, log, grid)
+    edges = capture_edges(g, sdc)
+    g.endpoints = check(g, sdc, edges, log, grid)
     backward(g, order, g.endpoints, log, grid)
     return g
 
@@ -250,25 +313,52 @@ def topological_order(g):
     return order
 
 
-def clock_latency(sdc, pin):
-    """R14: pin-level latency wins over the clock-level value, whatever the line order."""
-    return sdc.pin_latency.get(pin, sdc.clock_latency)
+def clock_latency(sdc, pin, clock=None):
+    """R14: pin-level latency wins over the clock-level value, whatever the line order.
+    `clock` is the pin's clock (R51; default the first)."""
+    return sdc.pin_latency.get(pin, (clock or _first(sdc)).latency)
+
+
+def _first(sdc):
+    return next(iter(sdc.clocks.values()))
+
+
+def is_source(n):
+    """PIs, clock ports and the CK pins of ideal clocks take their values from the SDC;
+    every other node, the CK pins of a propagated clock included, from its fanin (R50)."""
+    if n.kind == "CK":
+        return n.clock is None or not n.clock.propagated
+    return n.kind in ("PI", "clock_port")
 
 
 def set_sources(g, sdc, log=None):
-    """§5: PIs from set_input_delay / set_input_transition, CK pins from the ideal clock."""
+    """§5: PIs from set_input_delay / set_input_transition, CK pins from the ideal clock.
+    R50: a propagated clock's port rises at 0 and falls at half the period, with the
+    port's set_input_transition as its slew; its latency and transition are not used.
+    A CK pin that no clock reaches is clocked by the first clock, ideally (P2's rule);
+    so is a PI without set_input_delay (R51)."""
+    first = _first(sdc)
     for n in g.nodes:
         if n.kind == "PI":
             delay = sdc.input_delay.get(n.name, {})
+            n.launch_clock = sdc.clocks.get(sdc.input_clock.get(n.name), first)
             for rf in ("r", "f"):
                 n.at["late"][rf] = delay.get("max", 0.0)
                 n.at["early"][rf] = delay.get("min", 0.0)
                 for mode in MODES:
                     n.slew[mode][rf] = sdc.input_transition.get(n.name, 0.0)
-        elif n.kind == "CK":
+        elif n.kind == "clock_port" and n.clock.propagated:
             for mode in MODES:
-                n.at[mode]["r"] = clock_latency(sdc, n.name)
-                n.slew[mode]["r"] = sdc.clock_transition
+                n.at[mode]["r"], n.at[mode]["f"] = 0.0, n.clock.period / 2.0
+                for rf in ("r", "f"):
+                    n.slew[mode][rf] = sdc.input_transition.get(n.name, 0.0)
+        elif n.kind == "CK":
+            n.launch_clock = n.clock or first
+            if not is_source(n):
+                continue
+            for mode in MODES:
+                n.at[mode]["r"] = clock_latency(sdc, n.name, n.launch_clock)
+                n.slew[mode]["r"] = n.launch_clock.transition
         else:
             continue
         if log is not None:
@@ -319,7 +409,7 @@ def forward(g, order, log=None, grid=None):
     """§6: AT is the max (late) / min (early) over incoming arcs, ties to the first
     candidate by (source name, r before f); SLEW is the worst over all arcs."""
     for v in order:
-        if v.kind in ("PI", "CK", "clock_port"):
+        if is_source(v):
             continue
         for mode in MODES:
             for rf in ("r", "f"):
@@ -352,14 +442,78 @@ def forward(g, order, log=None, grid=None):
                                 "winner": w, "source": None})
 
 
-def check(g, sdc, log=None, grid=None):
+# R51: launch and capture edges are paired over at most this many launch periods.
+MAX_EDGES = 10000
+
+
+def edge_pair(launch, capture):
+    """R51: (setup, hold) capture edge times for data launched at 0 by clock `launch` and
+    captured by clock `capture`, both rising at 0 and every period. Over their common
+    period, each launch edge pairs with the first capture edge after it for setup and with
+    the last capture edge at or before it for hold; setup takes the smallest gap, hold the
+    largest, as OpenSTA does (checked on nine period pairs)."""
+    lp, cp = Fraction(repr(launch.period)), Fraction(repr(capture.period))
+    count = (lp / cp).denominator
+    if count > MAX_EDGES:
+        raise P2Error(None, None, "clocks %s and %s have no common period within %d periods"
+                      % (launch.name, capture.name, MAX_EDGES))
+    setup = hold = None
+    for k in range(count):
+        e_l = k * lp
+        e_c = (e_l // cp + 1) * cp
+        s, h = e_c - e_l, (e_l // cp) * cp - e_l
+        setup = s if setup is None else min(setup, s)
+        hold = h if hold is None else max(hold, h)
+    return float(setup), float(hold)
+
+
+def capture_edges(g, sdc):
+    """R51: {capture clock name: {"setup": t, "hold": t}} for every clock an endpoint
+    checks against. One forward pass serves all launching clocks only when they pair with
+    each capture clock at the same edges; otherwise this is an error (a pass per launching
+    clock is not built yet)."""
+    launch = []
+    for n in g.nodes:
+        if n.launch_clock is not None and n.launch_clock not in launch:
+            launch.append(n.launch_clock)
+    capture = []
+    for n in g.nodes:
+        if n.kind == "D":
+            capture += [c.ck.launch_clock for c in n.checks]
+        elif n.kind == "PO" and n.name in sdc.output_delay:
+            capture.append(sdc.clocks[sdc.output_clock[n.name]])
+    edges = {}
+    for cap in capture:
+        if cap.name in edges:
+            continue
+        pairs = [(clock, edge_pair(clock, cap)) for clock in launch or [_first(sdc)]]
+        for clock, pair in pairs[1:]:
+            if pair != pairs[0][1]:
+                raise P2Error(None, None, "clocks %s and %s launch data that clock %s captures "
+                              "at different edges (setup/hold %s and %s); one propagation "
+                              "per launching clock is not supported yet"
+                              % (pairs[0][0].name, clock.name, cap.name,
+                                 "/".join(map(fmt, pairs[0][1])), "/".join(map(fmt, pair))))
+        edges[cap.name] = {"setup": pairs[0][1][0], "hold": pairs[0][1][1]}
+    return edges
+
+
+def fmt(v):
+    return ("%.4f" % v).rstrip("0").rstrip(".")
+
+
+def check(g, sdc, edges, log=None, grid=None):
     """§7: required times of the D pins (constraint tables at D slew x CK slew) and of the
-    output ports with set_output_delay. Returns the endpoints."""
+    output ports with set_output_delay. Returns the endpoints. R51: against the capture
+    clock's edge from `edges` and that clock's uncertainty."""
     endpoints = []
     for n in g.nodes:
         if n.kind == "D":
             for c in n.checks:
                 mode = "late" if c.kind == "setup" else "early"
+                clock = c.ck.launch_clock
+                n.capture_clock, n.capture_edges = clock, edges[clock.name]
+                edge = n.capture_edges[c.kind]
                 ck_at, ck_slew = c.ck.at[mode]["r"], c.ck.slew[mode]["r"]
                 for rf in ("r", "f"):
                     if n.slew[mode][rf] is None or ck_at is None:
@@ -368,29 +522,33 @@ def check(g, sdc, log=None, grid=None):
                                 {"constrained_pin_transition": n.slew[mode][rf],
                                  "related_pin_transition": ck_slew}, grid)
                     if c.kind == "setup":
-                        n.rat["late"][rf] = ck_at + sdc.period - t - sdc.uncertainty["setup"]
+                        n.rat["late"][rf] = ck_at + edge - t - clock.uncertainty["setup"]
                     else:
-                        n.rat["early"][rf] = ck_at + t + sdc.uncertainty["hold"]
+                        n.rat["early"][rf] = ck_at + edge + t + clock.uncertainty["hold"]
                     if log is not None:
                         log.append({"phase": "check", "pin": n.name, "kind": c.kind, "rf": rf,
                                     "ck": c.ck.name, "d_slew": n.slew[mode][rf],
                                     "ck_slew": ck_slew, "t": t, "ck_at": ck_at,
-                                    "period": sdc.period, "uncertainty": sdc.uncertainty[c.kind],
+                                    "period": n.capture_edges["setup"], "edge": edge,
+                                    "uncertainty": clock.uncertainty[c.kind],
                                     "output_delay": None, "rat": n.rat[mode][rf]})
             endpoints.append(n)
         elif n.kind == "PO" and n.name in sdc.output_delay:
             delay = sdc.output_delay[n.name]
+            clock = sdc.clocks[sdc.output_clock[n.name]]
+            n.capture_clock, n.capture_edges = clock, edges[clock.name]
             for rf in ("r", "f"):
                 if "max" in delay:
-                    n.rat["late"][rf] = sdc.period - delay["max"]
+                    n.rat["late"][rf] = n.capture_edges["setup"] - delay["max"]
                 if "min" in delay:
-                    n.rat["early"][rf] = 0.0 - delay["min"]
+                    n.rat["early"][rf] = n.capture_edges["hold"] - delay["min"]
                 if log is not None:
                     for facet, kind, mode in (("max", "setup", "late"), ("min", "hold", "early")):
                         if facet in delay:
                             log.append({"phase": "check", "pin": n.name, "kind": kind, "rf": rf,
                                         "ck": None, "d_slew": None, "ck_slew": None, "t": None,
-                                        "ck_at": None, "period": sdc.period,
+                                        "ck_at": None, "period": n.capture_edges["setup"],
+                                        "edge": n.capture_edges[kind],
                                         "uncertainty": None, "output_delay": delay[facet],
                                         "rat": n.rat[mode][rf]})
             endpoints.append(n)
@@ -402,7 +560,8 @@ def backward(g, order, endpoints, log=None, grid=None):
     the delay taken with this node's slew; endpoints keep their RAT from §7."""
     ends = set(endpoints)
     for u in reversed(order):
-        if u in ends:
+        # R50: no required time flows into a clock network.
+        if u in ends or (u.clock is not None and u.kind != "CK"):
             continue
         for mode in MODES:
             for rf in ("r", "f"):
@@ -452,7 +611,7 @@ def worst_path(node, kind, rf, log=None):
     """(node, rf) pairs from the startpoint to (node, rf), following PRED in the check's mode."""
     mode = "late" if kind == "setup" else "early"
     path = [(node, rf)]
-    while path[-1][0].pred[mode][path[-1][1]] is not None:
+    while path[-1][0].kind not in ("PI", "CK") and path[-1][0].pred[mode][path[-1][1]] is not None:
         path.append(path[-1][0].pred[mode][path[-1][1]])
     path = path[::-1]
     if log is not None:

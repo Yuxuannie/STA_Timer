@@ -70,7 +70,7 @@ def worst_path(endpoint, check):
         return None
     mode = MODE[check]
     steps = [(endpoint, rf, None)]
-    while steps[-1][0].pred[mode][steps[-1][1]] is not None:
+    while steps[-1][0].kind not in SOURCES and steps[-1][0].pred[mode][steps[-1][1]] is not None:
         v, rf_v, _ = steps[-1]
         u, rf_u = v.pred[mode][rf_v]
         # The arc PRED went through: among arcs u -> v with this pair, the one giving the AT.
@@ -159,23 +159,37 @@ def summary(g):
 
 
 def capture(path, sdc):
-    """Capture-side values of a path (report_p3.md §4, json_v1.md `capture`)."""
+    """Capture-side values of a path (report_p3.md §4, json_v1.md `capture`); the edge and
+    the uncertainty are the endpoint's capture clock's (R51)."""
     e, check = path.endpoint, path.check
-    edge = sdc.period if check == "setup" else 0.0
+    edge = e.capture_edges[check]
     if e.kind == "D":
         ck = [c.ck for c in e.checks if c.kind == check][0]
         latency = ck.at[MODE[check]]["r"]
+        u = e.capture_clock.uncertainty[check]
         if check == "setup":
-            u = sdc.uncertainty["setup"]
             t = (latency + edge - u) - path.required
         else:
-            u = sdc.uncertainty["hold"]
-            t = path.required - (latency + u)
-        return {"clock_edge": edge, "latency": latency, "uncertainty": u, "check": t,
-                "output_delay": None, "rat": path.required, "pin": ck.name, "cell": ck.cell}
+            t = path.required - (latency + edge + u)
+        out = {"clock_edge": edge, "latency": latency, "uncertainty": u, "check": t,
+               "output_delay": None, "rat": path.required, "pin": ck.name, "cell": ck.cell}
+        if e.capture_clock.propagated:
+            out["network"] = "propagated"
+        return out
     delay = sdc.output_delay[e.name]["max" if check == "setup" else "min"]
     return {"clock_edge": edge, "latency": None, "uncertainty": None, "check": None,
             "output_delay": delay, "rat": path.required, "pin": None, "cell": None}
+
+
+def launch(first):
+    """The launch object of json_v1.md for the path's first point; "network" is there only
+    for a propagated clock (R50)."""
+    out = {"clock_edge": 0.0,
+           "latency": num(first.at) if first.node.kind == "CK" else None,
+           "input_delay": num(first.at) if first.node.kind == "PI" else None}
+    if first.node.kind == "CK" and first.node.launch_clock.propagated:
+        out["network"] = "propagated"
+    return out
 
 
 def path_json(path, sdc, pid):
@@ -189,10 +203,9 @@ def path_json(path, sdc, pid):
     cap = capture(path, sdc)
     return {"id": pid, "type": "max" if path.check == "setup" else "min", "check": path.check,
             "start": path.start.name, "end": path.endpoint.name,
-            "launch_clock": sdc.clock_name, "capture_clock": sdc.clock_name,
+            "launch_clock": first.node.launch_clock.name,
+            "capture_clock": path.endpoint.capture_clock.name,
             "points": points,
-            "launch": {"clock_edge": 0.0,
-                       "latency": num(first.at) if first.node.kind == "CK" else None,
-                       "input_delay": num(first.at) if first.node.kind == "PI" else None},
+            "launch": launch(first),
             "capture": {k: (num(v) if isinstance(v, float) else v) for k, v in cap.items()},
             "arrival": num(path.arrival), "required": num(path.required), "slack": num(path.slack)}

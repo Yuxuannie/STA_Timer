@@ -39,10 +39,11 @@ def parse_file(path):
     return parse(read_file(path), path)
 
 
-def parse(text, filename):
-    """Parse Liberty text into its single top-level group. Tokens are read as the parser needs
-    them (R45): the first error in file order is the one reported, and nothing after it is read."""
-    p = _Parser(_tokenize(text, filename), filename)
+def parse(text, filename, line=1):
+    """Parse Liberty text into its single top-level group; `line` is the line the text starts
+    on in its file. Tokens are read as the parser needs them (R45): the first error in file
+    order is the one reported, and nothing after it is read."""
+    p = _Parser(_tokenize(text, filename, line), filename)
     holder = Group("", [], 0)
     first = p.peek()
     p.statement(holder)
@@ -58,11 +59,11 @@ _TOKEN = re.compile(r'(?P<ws>\s+)|(?P<word>(?:[^\s(){}:;,"\\/]|/(?!\*))+)|(?P<pu
 _CONT = re.compile(r"\\[ \t\r]*\n")
 
 
-def _tokenize(text, filename):
+def _tokenize(text, filename, line=1):
     """Yield (kind, value, line) tuples; kind is a punctuation char, 'str', 'word' or 'eof'.
     One regex match per token (R42); the output, errors included, is that of the character
     loop it replaced (kept as tests/test_tokenizer.py `_tokenize_reference`)."""
-    i, line, n = 0, 1, len(text)
+    i, n = 0, len(text)
     match = _TOKEN.match
     while i < n:
         m = match(text, i)
@@ -273,8 +274,8 @@ class Cell:
 class Library:
     """`time_unit` is the attribute's text ("1ns"), `cap_unit` (value, unit) or None when
     the library does not declare it (R37: an error at design load, not here).
-    `cells` holds the built cells, `unbuilt` maps the name of every other cell to its group
-    (R46)."""
+    `cells` holds the built cells, `unbuilt` maps the name of every other cell to a function
+    that returns its group (R46), parsing it first when the library was loaded lazily (R49)."""
 
     def __init__(self, name, cap_unit, cells, time_unit=None, unbuilt=None, build_cell=None):
         self.name = name
@@ -348,10 +349,64 @@ def load(path, cells=None):
 
 def loads(text, filename, cells=None):
     """The library of `text` with the cells named in `cells` built (all when None); the
-    others can be built later with Library.build (R46)."""
-    lib = _Builder(filename).library(parse(text, filename))
+    others can be built later with Library.build (R46). With `cells` given, a cell is
+    parsed only when it is built (R49)."""
+    if cells is None:
+        lib = _Builder(filename).library(parse(text, filename))
+    else:
+        lib = _lazy(text, filename)
     lib.build(cells)
     return lib
+
+
+# R49: braces outside strings and comments, one match per brace (the text before it is
+# matched whole: "normal* (special normal*)*" over the tokenizer's string and comment rules).
+_SCAN = re.compile(r'[^{}"/]*(?:(?:"[^"]*"|/\*.*?\*/|/(?!\*))[^{}"/]*)*([{}])', re.S)
+_CELL_HEADER = re.compile(r'\bcell\s*\(\s*"?([^"(){};,\s]+)"?\s*\)\s*$')
+
+
+def _cell_spans(text):
+    """(start, end, name) of each `cell (NAME) { ... }` directly inside the top-level group,
+    or None when the scan meets text it cannot follow (an unterminated string, say)."""
+    spans, depth, pos, cell = [], 0, 0, None
+    for m in _SCAN.finditer(text):
+        if m.start() != pos:
+            return None
+        pos = m.end()
+        if m.group(1) == "{":
+            depth += 1
+            if depth == 2:
+                header = _CELL_HEADER.search(text, m.start(), pos - 1)
+                cell = header and (header.start(), header.group(1))
+        else:
+            depth -= 1
+            if depth < 0:
+                return None
+            if depth == 1 and cell:
+                spans.append((cell[0], pos, cell[1]))
+                cell = None
+    return spans if depth == 0 else None
+
+
+def _lazy(text, filename):
+    """R49: a library whose cells are parsed when they are built. The top-level group is
+    parsed without its cells (each replaced by its newlines, so lines stay right); a scan
+    of the braces finds the cells. A syntax error inside a cell that is never built is
+    not reported; when the scan cannot follow the text, the whole text is parsed."""
+    spans = _cell_spans(text)
+    if spans is None:
+        return _Builder(filename).library(parse(text, filename))
+    pieces, pos, line, cells = [], 0, 1, {}
+    for start, end, name in spans:
+        pieces.append(text[pos:start])
+        line += text.count("\n", pos, start)
+        newlines = text.count("\n", start, end)
+        pieces.append("\n" * newlines)
+        cells[name] = lambda s=start, e=end, n=line: parse(text[s:e], filename, n)
+        line += newlines
+        pos = end
+    pieces.append(text[pos:])
+    return _Builder(filename).library(parse("".join(pieces), filename), cells)
 
 
 class _Builder:
@@ -392,7 +447,7 @@ class _Builder:
             return default
         return [x for v in attr.values for x in self.numbers(attr, v, ctx)]
 
-    def library(self, root):
+    def library(self, root, lazy_cells=None):
         name = self.names(root)[0]
         unit = self.first(root, "capacitive_load_unit")
         cap_unit = None
@@ -411,9 +466,10 @@ class _Builder:
                                 self.index(g, "index_2", ctx, None), variables)
         unbuilt = {}
         for g in root.find_groups("cell"):
-            unbuilt[self.names(g)[0]] = g
+            unbuilt[self.names(g)[0]] = lambda g=g: g
+        unbuilt.update(lazy_cells or {})
         return Library(name, cap_unit, {}, self.text(root, "time_unit", None), unbuilt,
-                       lambda g: self.cell(g, templates))
+                       lambda group: self.cell(group(), templates))
 
     def cell(self, group, templates):
         name = self.names(group)[0]
