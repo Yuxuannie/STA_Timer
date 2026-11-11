@@ -1,6 +1,6 @@
-"""Viewer data sources without Tk (R28, viewer_p4.md): the in-process engine, or one saved
-bundle (bundle_v1.md). Both answer the same questions, so model.py and app.py never ask
-which one they have:
+"""Viewer data sources without Tk (R28, viewer_p4.md): the in-process engine, one saved
+bundle (bundle_v1.md), or a report_timing text (R55, ptreport.py). All answer the same
+questions, so model.py and app.py never ask which one they have:
 
   rows()               endpoint rows {pin, kind, setup_slack, hold_slack}
   summary(check)       {wns, tns, nvp} or None
@@ -21,8 +21,10 @@ which one they have:
 """
 
 import json
+import os
+import re
 
-from sta_toy import P2Error, bundle, design, lookup, paths, timer, trace
+from sta_toy import P2Error, bundle, design, lookup, paths, ptreport, timer, trace
 
 SCHEMA = "sta_toy.bundle/1"
 MODE = {"setup": "late", "hold": "early"}
@@ -59,6 +61,9 @@ class EngineSource:
         self.g = design.timed(lib, netlist, linked, sdc_path)
         self._design = (lib, netlist, linked, sdc_path)
         self._traces, self._log = {}, None
+        # R56: drivers from the netlist's nets, so an ideal clock net (left out of the timing
+        # graph, R50) still has one and the clock view can trace it.
+        self._drivers = dict((e.dst, n.name) for n in linked.nodes for e in n.edges if e.kind == "net")
         self.design_name = netlist.name
         self.clock_name = self.g.sdc.clock_name
         self.period = self.g.sdc.period
@@ -121,9 +126,7 @@ class EngineSource:
         return _merge(found, mode == "early")
 
     def driver(self, pin):
-        node = self.g.by_name.get(pin)
-        found = [a.src.name for a in node.fanin if a.kind == "net"] if node else []
-        return found[0] if found else None
+        return self._drivers.get(pin)
 
     def arrival(self, pin, check):
         node = self.g.by_name.get(pin)
@@ -301,6 +304,129 @@ class BundleSource:
 
     def arc_lookup(self, from_pin, to_pin, check, rf_from, rf_to):
         return None                     # a bundle holds delays, not tables
+
+    def check_lookup(self, pin, check, rf):
+        return None
+
+    def trace(self, endpoint):
+        return None                     # R41: engine mode only
+
+
+class ReportSource:
+    """R55: a report_timing text in PrimeTime's layout (ours from --format pt, or
+    PrimeTime's). It holds only what a report shows: per endpoint its worst reported setup
+    and hold path, and the cells and pins on the paths; no side inputs, no tables, no
+    merges, no trace."""
+
+    mode = "report"
+
+    def __init__(self, path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as e:
+            raise P2Error(None, None, "cannot read %s: %s" % (path, e.strerror or e))
+        found = ptreport.parse(text, path)
+        m = re.search(r"^\s*Design\s*:\s*(\S+)", text, re.M)
+        self.design_name = m.group(1) if m else os.path.basename(path)
+        self.by_end, self.nodes, self.insts, self.cell_arcs = {}, {}, {}, []
+        for p in found:
+            worst = self.by_end.setdefault(p["end"], {"setup": None, "hold": None})
+            if worst[p["check"]] is None or p["slack"] < worst[p["check"]]["slack"]:
+                worst[p["check"]] = p
+        for p in found:
+            self._add(p)
+        setup = [p for p in found if p["check"] == "setup"]
+        first = (setup or found)[0]
+        self.clock_name = first["capture_clock"]
+        self.period = (setup[0]["capture"]["clock_edge"] if setup else None) or 1.0
+
+    def _add(self, p):
+        mode = MODE[p["check"]]
+        pts = p["points"]
+        for k, q in enumerate(pts):
+            n = self.nodes.setdefault(q["pin"], {"pin": q["pin"], "cell": q["cell"],
+                                                 "at": {"late": {"r": None, "f": None}, "early": {"r": None, "f": None}},
+                                                 "slew": {"late": {"r": None, "f": None}, "early": {"r": None, "f": None}},
+                                                 "load": q["cap"], "driver": None,
+                                                 "kind": "PI" if k == 0 and q["cell"] is None else "other"})
+            n["at"][mode][q["rf"]] = q["at"]
+            n["slew"][mode][q["rf"]] = q["slew"]
+            if q["arc"] == "net" and k > 0:
+                n["driver"] = pts[k - 1]["pin"]
+            if q["arc"] in ("cell", "ckq"):
+                self.cell_arcs.append((pts[k - 1]["pin"], q["pin"], q["arc"], mode, pts[k - 1]["rf"] + q["rf"], q["incr"]))
+            if "/" in q["pin"] and q["cell"] is not None:
+                out = q["arc"] in ("cell", "ckq")
+                clock = k == 0 and p["launch"]["input_delay"] is None
+                self._pin(q["pin"], q["cell"], "output" if out else "input", clock, sequential=clock)
+        end = self.nodes[p["end"]]
+        end["kind"] = "D" if p["capture"]["pin"] is not None else "PO"
+        if p["capture"]["pin"] is not None:
+            self._pin(p["capture"]["pin"], p["capture"]["cell"], "input", True, sequential=True)
+
+    def _pin(self, pin, cell, direction, clock, sequential):
+        inst, name = pin.split("/", 1)
+        info = self.insts.setdefault(inst, {"cell": cell, "sequential": False, "pins": []})
+        info["sequential"] = info["sequential"] or sequential
+        if all(q["name"] != name for q in info["pins"]):
+            info["pins"].append({"name": name, "direction": direction, "clock": clock, "function": None})
+
+    def rows(self):
+        return [{"pin": end, "kind": self.nodes[end]["kind"],
+                 "setup_slack": w["setup"]["slack"] if w["setup"] else None,
+                 "hold_slack": w["hold"]["slack"] if w["hold"] else None}
+                for end, w in sorted(self.by_end.items())]
+
+    def summary(self, check):
+        return None
+
+    def paths(self, endpoint):
+        return dict(self.by_end.get(endpoint, {"setup": None, "hold": None}))
+
+    def cells(self):
+        return sorted(set(i["cell"] for i in self.insts.values()))
+
+    def instance(self, inst):
+        info = self.insts[inst]
+        pins = sorted(info["pins"], key=lambda q: (q["direction"] != "input", not q["clock"], q["name"]))
+        return {"cell": info["cell"], "sequential": info["sequential"], "pins": pins}
+
+    def fanin(self, pin, check, rf):
+        return []
+
+    def fanout(self, pin, check, rf):
+        return []
+
+    def driver(self, pin):
+        n = self.nodes.get(pin)
+        return n["driver"] if n else None
+
+    def arrival(self, pin, check):
+        n = self.nodes.get(pin)
+        return _worst(n["at"][MODE[check]], MODE[check]) if n else None
+
+    def pin(self, name):
+        n = self.nodes.get(name)
+        if n is None:
+            return None
+        slack = dict((c, w[c]["slack"] if w[c] else None) for c, w in
+                     ((c, self.by_end.get(name, {"setup": None, "hold": None})) for c in ("setup", "hold")))
+        return {"pin": name, "kind": n["kind"], "cell": n["cell"], "at": n["at"],
+                "rat": {"late": {"r": None, "f": None}, "early": {"r": None, "f": None}},
+                "slew": n["slew"], "slack": slack, "load": n["load"], "fanout": None}
+
+    def arcs(self, inst):
+        found = {}
+        for frm, to, kind, mode, pair, delay in self.cell_arcs:
+            if to.split("/")[0] == inst:
+                a = found.setdefault((frm, to), {"from": frm, "to": to, "kind": kind,
+                                                 "delay": {"late": dict.fromkeys(PAIRS), "early": dict.fromkeys(PAIRS)}})
+                a["delay"][mode][pair] = delay
+        return list(found.values())
+
+    def arc_lookup(self, from_pin, to_pin, check, rf_from, rf_to):
+        return None                     # a report holds delays, not tables
 
     def check_lookup(self, pin, check, rf):
         return None

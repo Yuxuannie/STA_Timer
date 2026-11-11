@@ -30,8 +30,10 @@ DRAWN = ("schematic", "trace")          # views that draw the schematic (pan, zo
 TABLE = [("pin", 128, "w"), ("cell", 62, "w"), ("arc", 58, "w"), ("rf", 44, "w"), ("load", 66, "e"),
          ("fanout", 66, "e"), ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"),
          ("pin slack", 100, "e")]
-HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2/3 views   [ / ] hide panels   "
-        "click ⊕ to open the driving cell   +/− zoom   F fit   %s +/− text size")
+HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2/3 tabs   V view   A/T/D/N show AT/slew/"
+        "delays/names   Z focus   [ / ] hide panels   +/− zoom   F fit   %s +/− text size")
+VIEW_LABELS = (("path", "Path"), ("cone", "Cone"), ("clock", "Clock"), ("both", "Setup + hold"))   # R56
+LAYER_LABELS = (("at", "AT"), ("slew", "Slew"), ("delay", "Delays"), ("names", "Names"))
 SCALE_STEP = 0.1                        # R52: one ⌘/Ctrl + / − press
 
 
@@ -79,6 +81,8 @@ class App:
         self.expansions = {}
         self.selected, self.stage, self.bin = None, None, None
         self.zoom, self.layout, self._fitted = 1.0, None, False
+        self.view_mode, self.focus = "path", False           # R56: the schematic's view, focus mode
+        self.layers = {"at": True, "slew": False, "delay": True, "names": True}
         self.replays, self.trace_truncated = {}, False
         self.errors, self.hits = [], {}
         self.sizes = dict((k, self.ipx(v)) for k, v in (("left", 300), ("right", 320), ("hist", 214),
@@ -158,6 +162,43 @@ class App:
             self.root.geometry("%dx%d" % (max(w, min_w), max(h, min_h)))
         self.set_theme(self.theme_name)
 
+    def set_view(self, name):
+        """R56: what the schematic shows of the path: path, cone, clock or both."""
+        if name not in model.VIEWS:
+            raise ValueError(name)
+        self.view_mode = name
+        if self.tab != "schematic":
+            self.set_tab("schematic")
+        else:
+            self.refresh(fit=False)
+
+    def set_layer(self, name, on=None):
+        """R56: show or hide one kind of schematic annotation (at, slew, delay, names);
+        on=None toggles it."""
+        self.layers[name] = not self.layers[name] if on is None else on
+        self._draw_view()
+        self._draw_tabs()
+
+    def toggle_focus(self):
+        """R56: the view alone (side panels, summary card and path table hidden), or back."""
+        if not self.focus:
+            self._remember_panes()
+        self.focus = not self.focus
+        self._apply_focus()
+        self._schedule_static()
+
+    def _apply_focus(self):
+        f = self.focus
+        self.body.paneconfigure(self.left_pane, hide=f or not self.show_left)
+        self.body.paneconfigure(self.insp, hide=f or not self.show_right)
+        self.center.paneconfigure(self.summary_cv, hide=f)
+        self.center.paneconfigure(self.table, hide=f)
+        if not f:
+            for pane, key, side in ((self.left_pane, "left", "width"), (self.insp, "right", "width"),
+                                    (self.summary_cv, "summary", "height"), (self.table, "table", "height")):
+                parent = self.body if key in ("left", "right") else self.center
+                parent.paneconfigure(pane, **{side: self.sizes[key]})
+
     def _paned(self, parent, orient):
         """A resizable split; its background is the colour of the draggable divider."""
         return tk.PanedWindow(parent, orient=orient, sashwidth=self.ipx(sizing.SASH), sashrelief="flat", sashpad=0, bd=0,
@@ -226,6 +267,8 @@ class App:
         body.add(self.insp, width=self.sizes["right"], minsize=ipx(MIN_RIGHT), stretch="never")
         body.paneconfigure(left, hide=not self.show_left)
         body.paneconfigure(self.insp, hide=not self.show_right)
+        if self.focus:
+            self._apply_focus()
         self.status = self._canvas(root, "panel", height=ipx(sizing.STATUS))
         self.status.grid(row=2, column=0, sticky="ew")
         for cv in (self.header, self.hist, self.list_head, self.plist, self.summary_cv, self.tabs, self.table,
@@ -340,7 +383,13 @@ class App:
                       ("<Key-KP_Add>", lambda: self.set_zoom(self.zoom * 1.2)),
                       ("<Key-minus>", lambda: self.set_zoom(self.zoom / 1.2)),
                       ("<Key-KP_Subtract>", lambda: self.set_zoom(self.zoom / 1.2)),
-                      ("<Key-0>", self.fit)):
+                      ("<Key-0>", self.fit),
+                      # R56: views, annotations, focus mode
+                      ("<Key-v>", lambda: self.set_view(model.VIEWS[(model.VIEWS.index(self.view_mode) + 1)
+                                                                    % len(model.VIEWS)])),
+                      ("<Key-a>", lambda: self.set_layer("at")), ("<Key-t>", lambda: self.set_layer("slew")),
+                      ("<Key-d>", lambda: self.set_layer("delay")), ("<Key-n>", lambda: self.set_layer("names")),
+                      ("<Key-z>", self.toggle_focus)):
             self.root.bind(k, key(fn))
         # R52: ⌘/Ctrl + / − / 0 change the UI scale, also while typing in the filter.
         for k, fn in (("plus", lambda: self.set_scale(self.s + SCALE_STEP)),
@@ -524,8 +573,9 @@ class App:
         if path and self.tab == "trace":        # R41: the whole cone, user expansions untouched
             self.layout, self.trace_truncated = model.auto_expand(path, self.source)
         else:
-            self.layout = model.schematic(path, self.source, self.expanded) if path else None
-            if self.layout:
+            other = self.paths.get("hold" if self.check == "setup" else "setup") if path else None
+            self.layout = model.view(self.view_mode, path, self.source, self.expanded, other) if path else None
+            if self.layout and self.view_mode == "path":     # R56: only hand-opened inputs are kept
                 self.expanded[:] = self.layout["expanded"]
         if fit:
             self._fitted = False
@@ -541,12 +591,14 @@ class App:
 
     def _redraw_static(self):
         self._draw_header()
-        self._draw_hist()
-        self._draw_list()
-        self._draw_summary()
+        if not self.focus:               # R56: hidden in focus mode, drawn again when it ends
+            self._draw_hist()
+            self._draw_list()
+            self._draw_summary()
         self._draw_tabs()
-        self._draw_table()
-        self._draw_inspector()
+        if not self.focus:
+            self._draw_table()
+            self._draw_inspector()
         self._draw_status()
 
     def _clear(self, cv):
@@ -837,7 +889,9 @@ class App:
         need = int(y + P(24))            # never cut the receipt: the strip grows to hold it
         if int(self.center.panecget(cv, "minsize")) != need:
             self.center.paneconfigure(cv, minsize=need)
-        if cv.winfo_height() < need:
+        if cv.winfo_ismapped() and cv.winfo_height() < need:
+            # Only a shown strip: a hidden one (focus mode, R56) keeps height 1, and growing it
+            # would re-layout the panes, resize the view and redraw, forever.
             self.center.paneconfigure(cv, height=need)
 
     def _terms(self, cv, x, y, terms, limit):
@@ -873,8 +927,13 @@ class App:
                 self._hit(cv, hit, lambda k=tab: self.set_tab(k))
             x = x1 + P(26)
         tabs_end = x
-        rows = self._trace_controls(cv, w, base + P(17), tabs_end) if self.tab == "trace" else 1
-        height = self.ipx((40, 72, 96)[rows - 1])
+        if self.tab == "trace":
+            rows = self._trace_controls(cv, w, base + P(17), tabs_end)
+        elif self.tab == "schematic":
+            rows = self._view_controls(cv, w, base + P(17))
+        else:
+            rows = 1
+        height = self.ipx((40, 72, 96, 120)[rows - 1])
         if int(cv.cget("height")) != height:
             cv.configure(height=height)
         cv.create_line(0, height - 1, w, height - 1, fill=c["line"])
@@ -898,6 +957,41 @@ class App:
             x = x0 - P(20 if label in ("Collapse", "Fit") else 10)
         if self.expanded and x - P(10) - self.font("ui", 10).measure("9 opened") > tabs_end + P(20):
             self._text(cv, x - P(10), P(20), "%d opened" % len(self.expanded), "ui", 10, False, "faint", "e")
+
+    def _view_controls(self, cv, w, y):
+        """R56: the schematic's view, its annotations and focus mode, from the strip's second
+        row, wrapping to the next when the centre is narrow. Returns the number of rows used."""
+        P = self.px
+        rows, x = 2, P(24)
+        items = [("eyebrow", "view", None)]
+        # ("item", label, action, colour, bold): the current view and focus mode in bold ink,
+        # annotations shown in ink, hidden ones faint.
+        items += [("item", label, (lambda k=name: self.set_view(k)), "ink" if self.view_mode == name else "muted",
+                   self.view_mode == name) for name, label in VIEW_LABELS]
+        items += [("eyebrow", "show", None)]
+        items += [("item", ("● " if self.layers[name] else "○ ") + label, (lambda k=name: self.set_layer(k)),
+                   "ink" if self.layers[name] else "faint", False) for name, label in LAYER_LABELS]
+        items += [("item", "Exit focus" if self.focus else "Focus", self.toggle_focus,
+                   "ink" if self.focus else "muted", self.focus)]
+        for item in items:
+            kind, label, fn = item[0], item[1], item[2]
+            text = self._caps(label) if kind == "eyebrow" else label
+            width = self.font("ui", 9 if kind == "eyebrow" else 11, kind == "eyebrow").measure(text)
+            gap = P(22) if kind == "eyebrow" and x > P(24) else 0
+            if x + gap + width > w - P(24) and x > P(24):
+                rows, x, y, gap = rows + 1, P(24), y + P(24), 0
+            x += gap
+            if kind == "eyebrow":
+                self._eyebrow(cv, x, y, label)
+                x += width + P(10)
+                continue
+            t = self._text(cv, x, y, label, "ui", 11, item[4], item[3])
+            x0, y0, x1, y1 = cv.bbox(t)
+            hit = cv.create_rectangle(x0 - P(5), y - P(11), x1 + P(5), y + P(11), outline="", fill="")
+            for it in (t, hit):
+                self._hit(cv, it, fn)
+            x = x1 + P(14)
+        return rows
 
     def _trace_controls(self, cv, w, y, tabs_end):
         """R41: the replay's step controls on the tab strip's second row, the phase label at
@@ -962,12 +1056,14 @@ class App:
         cv.configure(scrollregion=(ox, oy, ox + max(w, bw), oy + max(h, bh)))
         hop = model.stages(self.path())[self.stage] if self.stage is not None and not trace else None
         on_path = set(p["pin"] for e in lay["elements"] for p in e["pins"] if p["on_path"])
-        for wire in sorted(lay["wires"], key=lambda x: x["on_path"]):
+        other = self._other_colour()
+        for wire in sorted(lay["wires"], key=lambda x: (x["on_path"], x.get("on_other", False))):
             hot = hop is not None and hop["kind"] == "net" and wire["to"] == hop["pin"] and wire["on_path"]
-            colour = c["focus"] if hot else (c["accent"] if wire["on_path"] else c["wire"])
+            colour = c["focus"] if hot else (c["accent"] if wire["on_path"] else
+                                             (other if wire.get("on_other") else c["wire"]))
             cv.create_line(*[S(v) for xy in wire["points"] for v in xy], fill=colour,
-                           width=S(2.6 if hot else (2.0 if wire["on_path"] else 1.1)), capstyle="round",
-                           joinstyle="round")
+                           width=S(2.6 if hot else (2.0 if wire["on_path"] else (1.8 if wire.get("on_other") else 1.1))),
+                           capstyle="round", joinstyle="round")
         for e in lay["elements"]:
             if e["kind"] == "port":
                 self._draw_port(e, S)
@@ -980,17 +1076,29 @@ class App:
         base = dict((e["name"], p["y"]) for e in lay["elements"] for p in e["pins"] if p["on_path"] and p["side"] == "in")
         for st in lay["stubs"]:          # labels move away from the path: under the stubs below it
             self._draw_stub(st, S, st["y"] > base.get(st["pin"].split("/")[0], st["y"]))
-        for b in lay["badges"]:          # knocked out of whatever runs behind them
-            text = b["text"]
-            if trace:                    # R41: only what the replay has reached, from the log
-                got = self._replayed(b["pin"])
-                if got is None:
-                    continue
-                text = "%s %s" % (fmt4(got[0]["at"]), got[1])
-            t = self._text(cv, S(b["x"]), S(b["y"]), text, "mono", 9 * z, False, "accent_ink", b["anchor"])
-            x0, y0, x1, y1 = cv.bbox(t)
-            bg = cv.create_rectangle(x0 - S(2), y0, x1 + S(2), y1, fill=c["bg"], outline="")
-            cv.tag_lower(bg, t)
+        badges = [(b, "accent_ink") for b in lay["badges"]] + [(b, other) for b in lay.get("other_badges", [])]
+        for b, colour in badges:         # knocked out of whatever runs behind them
+            lines = []
+            if self.layers["at"]:
+                text = b["text"]
+                if trace:                # R41: only what the replay has reached, from the log
+                    got = self._replayed(b["pin"])
+                    text = None if got is None else "%s %s" % (fmt4(got[0]["at"]), got[1])
+                if text:
+                    lines.append(text)
+            if self.layers["slew"] and b.get("slew") and not trace:      # R56: the slew under it
+                lines.append("s " + b["slew"])
+            y = S(b["y"])
+            for text in lines:
+                t = self._text(cv, S(b["x"]), y, text, "mono", 9 * z, False, colour, b["anchor"])
+                x0, y0, x1, y1 = cv.bbox(t)
+                bg = cv.create_rectangle(x0 - S(2), y0, x1 + S(2), y1, fill=c["bg"], outline="")
+                cv.tag_lower(bg, t)
+                y = y1
+
+    def _other_colour(self):
+        """R56: the colour of the other check's path in the setup + hold view."""
+        return self.c["hold"] if self.check == "setup" else self.c["setup"]
 
     def _draw_port(self, e, S):
         cv, c = self.view, self.c
@@ -1003,8 +1111,8 @@ class App:
             pts = [x0, mid, x0 + 12, y0, x1, y0, x1, y1, x0 + 12, y1]
         item = cv.create_polygon(*[S(v) for v in pts], fill=c["raised"], outline=c["ink"] if on else c["faint"],
                                  width=S(1.3))
-        t = self._text(cv, S((x0 + x1) / 2.0 + (-4 if e["direction"] == "in" else 4)), S(mid), e["name"],
-                       "ui", 11 * self.zoom, True, "ink", "center")
+        t = self._text(cv, S((x0 + x1) / 2.0 + (-4 if e["direction"] == "in" else 4)), S(mid),
+                       e["name"] if self.layers["names"] else "", "ui", 11 * self.zoom, True, "ink", "center")
         self._text(cv, S(x0), S(y0 - 10), self._caps("input" if e["direction"] == "in" else "output"), "ui",
                    8 * self.zoom, False, "faint", "w")
         for it in (item, t):
@@ -1021,12 +1129,13 @@ class App:
         x0, y0, x1, y1 = e["x0"], e["y0"], e["x1"], e["y1"]
         # R53: the instance name first, then as much of the cell's label as the box leaves.
         avail, label = S(x1 - x0 - 8), self.cell_label(e["cell"])
+        names = self.layers["names"]                       # R56
         label_w = self.font("mono", 9 * z).measure(label)
-        shown = self._fit(e["name"], "ui", 11 * z, True, max(avail * 0.6, avail - label_w - S(8)), "end")
+        shown = self._fit(e["name"], "ui", 11 * z, True, max(avail * 0.6, avail - label_w - S(8)), "end") if names else ""
         name = self._text(cv, S(x0 + 4), S(y0 + 12), shown, "ui", 11 * z, True, "ink" if on else "muted")
         room = avail - self.font("ui", 11 * z, True).measure(shown) - S(8)
         items = [name]
-        if room > S(16):
+        if room > S(16) and names:
             items.append(self._text(cv, S(x1 - 4), S(y0 + 12), self._fit(label, "mono", 9 * z, False, room),
                                     "mono", 9 * z, False, "faint", "e"))
         for it in items:
@@ -1046,30 +1155,36 @@ class App:
             cv.create_line(*[S(v) for xy in back for v in xy], fill=outline, width=stroke, smooth=True)
         if bubble:
             cv.create_oval(S(bx1), S(mid - 4), S(bx1 + 8), S(mid + 4), fill=fill, outline=outline, width=stroke)
+        other = self._other_colour()
         for p in e["pins"]:
-            colour = c["accent"] if p["on_path"] else c["wire"]
-            lead = S(2.0 if p["on_path"] else 1.1)
+            colour = c["accent"] if p["on_path"] else (other if p.get("on_other") else c["wire"])
+            lead = S(2.0 if p["on_path"] else (1.8 if p.get("on_other") else 1.1))
+            pin_name = p["name"] if names else ""
             if p["side"] == "in":
                 edge = self._body_edge(kind, bx0, by0, bx1, by1, p["y"])
                 cv.create_line(S(x0), S(p["y"]), S(edge), S(p["y"]), fill=colour, width=lead)
                 if kind == "flop":
-                    self._text(cv, S(bx0 + 5), S(p["y"]), "▷" if p["clock"] else p["name"], "ui", 10 * z,
+                    self._text(cv, S(bx0 + 5), S(p["y"]), "▷" if p["clock"] else pin_name, "ui", 10 * z,
                                False, "ink" if p["on_path"] else "muted")
                 else:
-                    self._text(cv, S(x0 + 3), S(p["y"] - 7), p["name"], "ui", 9 * z, False,
+                    self._text(cv, S(x0 + 3), S(p["y"] - 7), pin_name, "ui", 9 * z, False,
                                "ink" if p["on_path"] else "faint")
             else:
                 start = bx1 + (8 if bubble else 0)
                 cv.create_line(S(start), S(p["y"]), S(x1), S(p["y"]), fill=colour, width=lead)
                 label_x = (bx1 - 5) if kind == "flop" else (x1 - 3)
-                self._text(cv, S(label_x), S(p["y"] - (0 if kind == "flop" else 7)), p["name"], "ui",
+                self._text(cv, S(label_x), S(p["y"] - (0 if kind == "flop" else 7)), pin_name, "ui",
                            (10 if kind == "flop" else 9) * z, False, "ink" if p["on_path"] else "faint", "e")
-            r = 3 if p["on_path"] else 2.5
-            dot = cv.create_oval(S(p["x"] - r), S(p["y"] - r), S(p["x"] + r), S(p["y"] + r),
-                                 fill=c["accent"] if p["on_path"] else c["raised"],
-                                 outline=c["accent"] if p["on_path"] else c["strong"], width=S(1.1))
+            r = 3 if p["on_path"] or p.get("on_other") else 2.5
+            fill_dot = c["accent"] if p["on_path"] else (other if p.get("on_other") else c["raised"])
+            dot = cv.create_oval(S(p["x"] - r), S(p["y"] - r), S(p["x"] + r), S(p["y"] + r), fill=fill_dot,
+                                 outline=c["accent"] if p["on_path"] else (other if p.get("on_other") else c["strong"]),
+                                 width=S(1.1))
             self._hit(cv, dot, lambda k=p["pin"]: self.select_pin(k))
-        if e["arc"]:
+        if not e["arc"] and e.get("other_arc") and self.layers["delay"]:     # R56: the other path's cell
+            self._text(cv, S((x0 + x1) / 2.0), S(y1 + 9), "+" + fmt4(e["other_arc"]["delay"]), "mono", 10 * z,
+                       False, other, "center")
+        if e["arc"] and self.layers["delay"]:
             hot = hop is not None and hop["pin"] == e["arc"]["to"] and hop["kind"] in ("cell", "ckq")
             label = "+" + fmt4(e["arc"]["delay"])
             if self.tab == "trace":      # R41: the winner delay once replayed
@@ -1108,7 +1223,7 @@ class App:
         ly, anchor = (y + 7, "ne") if below else (y - 7, "se")
         if st["state"] == "clock":
             cv.create_line(S(x - 26), S(y), S(x - 4), S(y), fill=c["wire"], dash=(2, 3), width=S(1.1))
-            at = "" if self.tab == "trace" else (st["at"] or "")       # R41: no unreplayed numbers
+            at = "" if self.tab == "trace" or not self.layers["at"] else (st["at"] or "")   # R41, R56
             self._text(cv, S(x - 4), S(ly), "clk %s" % at, "mono", 8 * z, False, "faint", anchor)
             return
         cv.create_line(S(x - model.STUB), S(y), S(x - 4), S(y), fill=c["wire"], width=S(1.1))
@@ -1125,9 +1240,9 @@ class App:
         else:
             self._text(cv, S(hx), S(y), "·", "ui", 11 * z, True, "faint", "center")
         if st["state"] == "none":
-            label = "outside bundle" if self.source.mode == "bundle" else "unconnected"
+            label = {"bundle": "outside bundle", "report": "not in the report"}.get(self.source.mode, "unconnected")
         else:
-            label = "" if self.tab == "trace" else (st["at"] or "")
+            label = "" if self.tab == "trace" or not self.layers["at"] else (st["at"] or "")
         t = self._text(cv, S(x - 4), S(ly), label, "mono", 8 * z, False, "faint", anchor)
         self._hit(cv, t, lambda k=st["pin"]: self.select_pin(k))
 

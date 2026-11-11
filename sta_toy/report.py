@@ -38,7 +38,7 @@ def format_path(p, transition=False, capacitance=False):
                                      (SOURCE_KIND if pi_start else FLOP_KIND) % launch_clk),
              "Endpoint: %s (%s)" % (p["end"], (FLOP_KIND if cap["pin"] else PO_KIND) % clk),
              "Path Group: %s" % clk,
-             "Path Type: %s" % p["type"],
+             "Path Type: %s%s" % (p["type"], " (PBA: path)" if p.get("pba") else ""),
              "", header, sep,
              row("clock %s (rise edge)" % launch_clk, launch["clock_edge"], launch["clock_edge"])]
     if pi_start:
@@ -78,6 +78,8 @@ def format_path(p, transition=False, capacitance=False):
                   row("data required time", path=-p["required"])]
     met = "VIOLATED" if fmt4(p["slack"]).startswith("-") else "MET"
     lines += [sep, row("slack (%s)" % met, path=p["slack"])]
+    if p.get("pba"):            # R54: a retimed path also shows the slack GBA gave it
+        lines.append(row("slack (GBA, before retiming)", path=p["gba_slack"]))
     return "".join(line + "\n" for line in lines)
 
 

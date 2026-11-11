@@ -4,7 +4,7 @@ selection (R22), the summary (R24), and the path object of json_v1.md."""
 import heapq
 import itertools
 
-from sta_toy import P2Error, timer
+from sta_toy import P2Error, lookup, timer
 from sta_toy.tsv import fmt4
 
 MODE = {"setup": "late", "hold": "early"}
@@ -17,18 +17,23 @@ def num(v):
 
 
 class Point:
-    """One (node, rf) of a path; arc names the arc into it ('start' for the first)."""
+    """One (node, rf) of a path; arc names the arc into it ('start' for the first). `slew` is
+    the slew of a retimed (PBA) path at this point, None on a GBA path (the node's slew)."""
 
-    def __init__(self, node, rf, arc, incr, at):
+    def __init__(self, node, rf, arc, incr, at, slew=None):
         self.node = node
         self.rf = rf
         self.arc = arc
         self.incr = incr
         self.at = at
+        self.slew = slew
 
 
 class Path:
+    """`gba` is the GBA path a PBA path was retimed from (R54), None on a GBA path."""
+
     def __init__(self, check, points, required):
+        self.gba = None
         self.check = check
         self.points = points
         self.start = points[0].node
@@ -80,6 +85,44 @@ def worst_path(endpoint, check):
         steps[-1] = (v, rf_v, arc)
         steps.append((u, rf_u, None))
     return _build(check, steps[::-1], endpoint.rat[mode][rf])
+
+
+def retime(path):
+    """R54, PBA in path mode: the same points, each arc's delay and output slew looked up again
+    with the slew carried along this path alone (GBA uses the worst slew over every fan-in
+    of a pin, §6), and a D endpoint's constraint looked up again at the path's D slew.
+    Among parallel arcs of one pin pair the worst for the check is taken, as for GBA paths.
+    A path in a propagated clock network starts at its CK pin, whose clock values are
+    path-independent, so they are kept."""
+    mode = MODE[path.check]
+    pick = max if mode == "late" else min
+    first = path.points[0]
+    at, slew = first.at, first.node.slew[mode][first.rf]
+    points = [Point(first.node, first.rf, "start", 0.0, at, slew)]
+    for prev, cur in zip(path.points, path.points[1:]):
+        steps = []
+        for arc in cur.node.fanin:
+            if arc.src is prev.node and (prev.rf, cur.rf) in arc.pairs:
+                if arc.tables is None:
+                    steps.append((0.0, slew))
+                else:
+                    args = {"input_net_transition": slew, "total_output_net_capacitance": arc.dst.load}
+                    delay, transition = arc.tables[cur.rf]
+                    steps.append((lookup.lookup(delay, args), lookup.lookup(transition, args)))
+        delay, slew = pick(steps, key=lambda s: s[0])
+        at += delay
+        points.append(Point(cur.node, cur.rf, cur.arc, delay, at, slew))
+    required, e = path.required, path.endpoint
+    if e.kind == "D":
+        c = [c for c in e.checks if c.kind == path.check][0]
+        ck_at, ck_slew = c.ck.at[mode]["r"], c.ck.slew[mode]["r"]
+        t = lookup.lookup(c.tables[path.rf], {"constrained_pin_transition": slew,
+                                              "related_pin_transition": ck_slew})
+        edge, u = e.capture_edges[path.check], e.capture_clock.uncertainty[path.check]
+        required = (ck_at + edge - t - u) if path.check == "setup" else (ck_at + edge + t + u)
+    out = Path(path.check, points, required)
+    out.gba = path
+    return out
 
 
 def _bound_slack(check, required, arrival):
@@ -197,11 +240,12 @@ def path_json(path, sdc, pid):
     mode = MODE[path.check]
     first = path.points[0]
     points = [{"pin": p.node.name, "cell": p.node.cell, "arc": p.arc, "rf": p.rf,
-               "incr": num(p.incr), "at": num(p.at), "slew": num(p.node.slew[mode][p.rf]),
+               "incr": num(p.incr), "at": num(p.at),
+               "slew": num(p.node.slew[mode][p.rf] if p.slew is None else p.slew),
                "cap": num(p.node.load) if any(a.kind == "net" for a in p.node.fanout) else None}
               for p in path.points]
     cap = capture(path, sdc)
-    return {"id": pid, "type": "max" if path.check == "setup" else "min", "check": path.check,
+    obj = {"id": pid, "type": "max" if path.check == "setup" else "min", "check": path.check,
             "start": path.start.name, "end": path.endpoint.name,
             "launch_clock": first.node.launch_clock.name,
             "capture_clock": path.endpoint.capture_clock.name,
@@ -209,3 +253,7 @@ def path_json(path, sdc, pid):
             "launch": launch(first),
             "capture": {k: (num(v) if isinstance(v, float) else v) for k, v in cap.items()},
             "arrival": num(path.arrival), "required": num(path.required), "slack": num(path.slack)}
+    if path.gba is not None:                     # R54: a retimed path keeps its GBA slack
+        obj["pba"] = "path"
+        obj["gba_slack"] = num(path.gba.slack)
+    return obj

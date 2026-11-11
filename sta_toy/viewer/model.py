@@ -99,8 +99,9 @@ def _col_x(col):
 class _Layout:
     """Builds the schematic of one path; see schematic()."""
 
-    def __init__(self, path, source):
+    def __init__(self, path, source, clocks=False):
         self.source = source
+        self.clocks = clocks      # R56: clock pins can be expanded too (the clock view)
         self.check = path["check"]
         self.points = {p["pin"]: p for p in path["points"]}
         self.elements = []
@@ -197,8 +198,8 @@ class _Layout:
     def side_inputs(self):
         for e in self.elements:
             for p in e["pins"]:
-                if p["side"] == "in" and not p["on_path"] and not p["clock"] \
-                        and e["kind"] == "module":
+                if p["side"] == "in" and e["kind"] == "module" and (
+                        (not p["on_path"] and not p["clock"]) or (self.clocks and p["clock"])):
                     yield e, p
 
     def expand(self, pin, count):
@@ -247,7 +248,7 @@ class _Layout:
             out.append(stub)
         for e in self.elements:
             for p in e["pins"]:
-                if p["clock"]:
+                if p["clock"] and not self.clocks:
                     arrival = self.source.arrival(p["pin"], self.check)
                     out.append({"pin": p["pin"], "x": p["x"], "y": p["y"], "state": "clock",
                                 "driver": None,
@@ -265,11 +266,36 @@ class _Layout:
                 # wire in the left part of the gap; side-input labels sit above it, on the right.
                 if p["side"] == "out":
                     out.append({"pin": p["pin"], "x": p["x"] + 8, "y": p["y"] + 8, "anchor": "nw",
-                                "text": "%s %s" % (fmt4(point["at"]), point["rf"])})
+                                "text": "%s %s" % (fmt4(point["at"]), point["rf"]),
+                                "slew": None if point.get("slew") is None else fmt4(point["slew"])})
         return out
 
+    def mark_other(self, other):
+        """R56: flag the pins, wires and cell delays of a second path (the overlay view) and
+        give its output pins off the first path their own AT badges."""
+        pts = other["points"]
+        pins = dict((q["pin"], q) for q in pts)
+        hops = set((pts[k - 1]["pin"], q["pin"]) for k, q in enumerate(pts) if k and q["arc"] == "net")
+        arcs = dict((q["pin"], (pts[k - 1]["pin"], q["incr"])) for k, q in enumerate(pts)
+                    if k and q["arc"] in ("cell", "ckq"))
+        badges = []
+        for e in self.elements:
+            e["other_arc"] = None
+            for p in e["pins"]:
+                p["on_other"] = p["pin"] in pins
+                if p["pin"] in arcs and arcs[p["pin"]][0].split("/")[0] == e["name"]:
+                    e["other_arc"] = {"from": arcs[p["pin"]][0], "to": p["pin"], "delay": arcs[p["pin"]][1]}
+                if p["on_other"] and p["side"] == "out" and not p["on_path"]:
+                    q = pins[p["pin"]]
+                    badges.append({"pin": p["pin"], "x": p["x"] + 8, "y": p["y"] + 8, "anchor": "nw",
+                                   "text": "%s %s" % (fmt4(q["at"]), q["rf"]),
+                                   "slew": None if q.get("slew") is None else fmt4(q["slew"])})
+        for w in self.wires:
+            w["on_other"] = (w["from"], w["to"]) in hops
+        return badges
 
-def schematic(path, source, expanded=()):
+
+def schematic(path, source, expanded=(), clocks=False, other=None):
     """The path's cells as modules (json_v1.md path object, source = viewer source).
 
     Lane 0 holds the path left to right, one element per grid column, each module shifted so
@@ -279,13 +305,14 @@ def schematic(path, source, expanded=()):
     Wires bend only in column gaps, so no wire crosses a box and no two boxes overlap.
     Returns {"elements", "wires", "stubs", "badges", "expanded" (the expansions applied),
     "bbox"} with coordinates shifted so the drawing starts at (MARGIN_X, MARGIN_Y)."""
-    lay = _Layout(path, source)
+    lay = _Layout(path, source, clocks)
     lay.path(path["points"])
     applied = []
     for pin in expanded:
         if lay.expand(pin, len(applied) + 1):
             applied.append(pin)
     stubs, badges = lay.stubs(), lay.badges(path["points"])
+    other_badges = lay.mark_other(other) if other else []
     dx = MARGIN_X - min(e["x0"] for e in lay.elements)
     dy = MARGIN_Y - min(e["y0"] for e in lay.elements)
     for e in lay.elements:
@@ -299,13 +326,13 @@ def schematic(path, source, expanded=()):
             e["arc"] = {"from": e["arc"][0], "to": e["arc"][1], "delay": e["arc"][2]}
     for w in lay.wires:
         w["points"] = [(x + dx, y + dy) for x, y in w["points"]]
-    for item in stubs + badges:
+    for item in stubs + badges + other_badges:
         item["x"] += dx
         item["y"] += dy
     width = max(e["x1"] for e in lay.elements) + MARGIN_X
     height = max(e["y1"] for e in lay.elements) + MARGIN_Y
     return {"elements": lay.elements, "wires": lay.wires, "stubs": stubs, "badges": badges,
-            "expanded": applied, "bbox": (0, 0, width, height)}
+            "other_badges": other_badges, "expanded": applied, "bbox": (0, 0, width, height)}
 
 
 # ---------------------------------------------------------------------------------- v3 views
@@ -634,6 +661,37 @@ def auto_expand(path, source, limit=300):
         if not stubs or pins >= limit:
             return lay, bool(stubs)
         expanded = lay["expanded"] + stubs
+
+
+VIEWS = ("path", "cone", "clock", "both")
+
+
+def view(name, path, source, expanded=(), other=None, limit=300):
+    """R56: the schematic of one view of a path. "path": the path and the side inputs opened
+    by hand (`expanded`); "cone": every side input opened (auto_expand); "clock": also the
+    clock paths, the launch and capture flops' CK pins traced back through the cells
+    driving them to the clock port; "both": the other check's path at the same endpoint
+    (`other`) opened along and flagged (pins / wires "on_other", "other_badges")."""
+    if name == "cone":
+        return auto_expand(path, source, limit)[0]
+    if name == "clock":
+        lay = schematic(path, source, expanded, clocks=True)
+        frontier = [p["pin"] for e in lay["elements"] for p in e["pins"] if p["clock"]]
+        while frontier and sum(len(e["pins"]) for e in lay["elements"]) < limit:
+            lay = schematic(path, source, lay["expanded"] + frontier, clocks=True)
+            added = set(source.driver(pin).split("/")[0] for pin in frontier
+                        if pin in lay["expanded"] and source.driver(pin))
+            frontier = [st["pin"] for st in lay["stubs"]
+                        if st["state"] == "expand" and st["pin"].split("/")[0] in added]
+        return lay
+    if name == "both" and other is not None:
+        lay = schematic(path, source, expanded, other=other)
+        for q in reversed(other["points"]):
+            states = dict((st["pin"], st["state"]) for st in lay["stubs"])
+            if states.get(q["pin"]) == "expand":
+                lay = schematic(path, source, lay["expanded"] + [q["pin"]], other=other)
+        return lay
+    return schematic(path, source, expanded)
 
 
 def cell_affixes(names):

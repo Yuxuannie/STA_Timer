@@ -1,16 +1,17 @@
 """Viewer entry point (R29, viewer_p4.md "Start"):
 python -m sta_toy.viewer --lib L [--lib L ...] --verilog V --sdc S [--theme NAME] [--scale S]
 python -m sta_toy.viewer --bundle FILE [--theme NAME] [--scale S]
+python -m sta_toy.viewer --report FILE [--theme NAME] [--scale S]     (R55: a report_timing text)
 Errors follow cli_p2.md: one stderr line, exit 1."""
 
 import sys
 
 from sta_toy import P2Error, StaError
 from sta_toy.viewer.sizing import parse_scale
-from sta_toy.viewer.source import BundleSource, EngineSource
+from sta_toy.viewer.source import BundleSource, EngineSource, ReportSource
 from sta_toy.viewer.theme import NAMES
 
-OPTIONS = ("--lib", "--verilog", "--sdc", "--bundle", "--theme", "--scale")
+OPTIONS = ("--lib", "--verilog", "--sdc", "--bundle", "--report", "--theme", "--scale")
 NO_TK = "error: the viewer needs a Python with tkinter"
 
 
@@ -33,10 +34,13 @@ def arguments(argv):
         raise P2Error(None, None, "--theme needs one of %s" % ", ".join(NAMES))
     if "--scale" in args:
         args["--scale"] = parse_scale(args["--scale"])
-    if "--bundle" in args:
-        if args["--lib"] or "--verilog" in args or "--sdc" in args:
-            raise P2Error(None, None, "--bundle cannot be combined with --lib, --verilog or --sdc")
-        return args
+    if "--bundle" in args and "--report" in args:
+        raise P2Error(None, None, "--bundle cannot be combined with --report")
+    for alone in ("--bundle", "--report"):
+        if alone in args:
+            if args["--lib"] or "--verilog" in args or "--sdc" in args:
+                raise P2Error(None, None, "%s cannot be combined with --lib, --verilog or --sdc" % alone)
+            return args
     for option in ("--lib", "--verilog", "--sdc"):
         if not args.get(option):
             raise P2Error(None, None, "missing %s" % option)
@@ -48,6 +52,8 @@ def main(argv):
         args = arguments(argv)
         if "--bundle" in args:
             source = BundleSource(args["--bundle"])
+        elif "--report" in args:
+            source = ReportSource(args["--report"])
         else:
             source = EngineSource(args["--lib"], args["--verilog"], args["--sdc"])
     except P2Error as e:

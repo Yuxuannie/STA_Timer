@@ -9,17 +9,19 @@ from sta_toy import P2Error, StaError, design, tsv, writer
 
 VALUE_OPTIONS = ("--lib", "--verilog", "--sdc", "--dump-tsv", "--path-delay", "--from", "--to",
                  "--through", "--max-paths", "--nworst", "--json", "--bundle", "--bundle-out",
-                 "--depth", "--max-nodes", "--trace")
+                 "--depth", "--max-nodes", "--trace", "--pba", "--format", "--significant-digits")
 FLAGS = ("--report-timing", "--report-summary", "--transition-time", "--capacitance",
-         "--check-timing")
+         "--check-timing", "--input-pins")
 OUTPUTS = ("--dump-tsv", "--report-timing", "--report-summary", "--json", "--bundle",
            "--check-timing", "--trace")
 NEEDS = {"--path-delay": "--report-timing", "--from": "--report-timing", "--to": "--report-timing",
          "--through": "--report-timing", "--max-paths": "--report-timing",
          "--nworst": "--report-timing", "--transition-time": "--report-timing",
          "--capacitance": "--report-timing", "--depth": "--bundle", "--max-nodes": "--bundle",
-         "--bundle-out": "--bundle", "--bundle": "--bundle-out"}
-INTEGERS = (("--max-paths", 1), ("--nworst", 1), ("--depth", 0), ("--max-nodes", 1))
+         "--bundle-out": "--bundle", "--bundle": "--bundle-out", "--pba": "--report-timing",
+         "--format": "--report-timing", "--input-pins": "--format", "--significant-digits": "--format"}
+INTEGERS = (("--max-paths", 1), ("--nworst", 1), ("--depth", 0), ("--max-nodes", 1),
+            ("--significant-digits", 0))
 
 
 def arguments(argv):
@@ -69,6 +71,12 @@ def arguments(argv):
             args[option] = int(args[option])
     if args.get("--path-delay", "max") not in ("max", "min"):
         error("--path-delay needs max or min")
+    if args.get("--format", "pt") != "pt":
+        error("--format needs pt")
+    if args.get("--significant-digits", 0) > 9:
+        error("--significant-digits needs an integer from 0 to 9")
+    if args.get("--pba", "path") != "path":
+        error("--pba needs path (exhaustive is not supported yet)")
     return args
 
 
@@ -87,8 +95,24 @@ def run(args):
         check = "setup" if args.get("--path-delay", "max") == "max" else "hold"
         found = paths.select(g, check, args.get("--max-paths", 1), args.get("--nworst", 1),
                              args.get("--from"), args.get("--to"), args.get("--through"))
+        if "--pba" in args:
+            # R54: the GBA selection, each path retimed, then ordered by its PBA slack.
+            found = sorted((paths.retime(p) for p in found), key=lambda p: round(p.slack, 9))
         objs = [paths.path_json(p, g.sdc, "p%d" % (i + 1)) for i, p in enumerate(found)]
-        text += report.report_timing(objs, "--transition-time" in args, "--capacitance" in args)
+        if "--format" in args:
+            # R55: PrimeTime's layout; the header names the equivalent report_timing options.
+            from sta_toy import ptreport
+            digits = args.get("--significant-digits", 2)
+            options = ["-path_type full", "-delay_type %s" % args.get("--path-delay", "max"),
+                       "-max_paths %d" % args.get("--max-paths", 1)]
+            options += [o for o, a in (("-nworst %d" % args.get("--nworst", 1), "--nworst"),
+                                       ("-input_pins", "--input-pins"), ("-transition_time", "--transition-time"),
+                                       ("-capacitance", "--capacitance"), ("-pba_mode path", "--pba")) if a in args]
+            options += ["-significant_digits %d" % digits, "-sort_by slack"]
+            text += ptreport.report_timing(objs, netlist.name, options, digits, "--input-pins" in args,
+                                           "--transition-time" in args, "--capacitance" in args)
+        else:
+            text += report.report_timing(objs, "--transition-time" in args, "--capacitance" in args)
     if "--report-summary" in args:
         text += report.format_summary(paths.summary(g))
     if "--check-timing" in args:
