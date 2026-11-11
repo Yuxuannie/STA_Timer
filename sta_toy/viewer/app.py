@@ -13,6 +13,7 @@ through font(); model coordinates stay at scale 1 and the schematic is drawn at 
 import math
 import tkinter as tk
 import tkinter.font as tkfont
+from tkinter import ttk
 
 from sta_toy.tsv import fmt4
 from sta_toy.viewer import model, sizing, theme
@@ -30,7 +31,8 @@ TABLE = [("pin", 128, "w"), ("cell", 62, "w"), ("arc", 58, "w"), ("rf", 44, "w")
          ("fanout", 66, "e"), ("slew", 66, "e"), ("incr", 72, "e"), ("AT", 76, "e"), ("RAT", 76, "e"),
          ("pin slack", 100, "e")]
 HINT = ("←/→ step pin to pin   ↑/↓ endpoint   S/H setup/hold   1/2/3 views   [ / ] hide panels   "
-        "drag a divider to resize   click ⊕ to open the driving cell   ⌘-scroll zoom   F fit")
+        "click ⊕ to open the driving cell   +/− zoom   F fit   %s +/− text size")
+SCALE_STEP = 0.1                        # R52: one ⌘/Ctrl + / − press
 
 
 def _num(v):
@@ -66,8 +68,12 @@ class App:
         self.root, self.source = root, source
         s0 = sizing.default_scale(root.tk.call("tk", "windowingsystem"), float(root.tk.call("tk", "scaling")))
         self.s = s0 if scale is None else scale
+        self.s0, self.s_start = s0, self.s
         self.font_scale = self.s / s0        # Tk already scales points by the display (tk scaling)
+        aqua = root.tk.call("tk", "windowingsystem") == "aqua"
+        self.mod, self.mod_name = ("Command", "⌘") if aqua else ("Control", "Ctrl")
         self.endpoints = model.EndpointList(source.rows())
+        self.affix = model.cell_affixes(source.cells())         # R53: left out of cell names
         self.check, self.endpoint, self.tab = "setup", None, "schematic"
         self.paths, self.path_cache = {"setup": None, "hold": None}, {}
         self.expansions = {}
@@ -132,6 +138,26 @@ class App:
         if self.endpoint:
             self.refresh(fit=False)
 
+    def set_scale(self, s):
+        """R52: the UI scale at run time (⌘/Ctrl + / − / 0), within --scale's range. Every
+        pixel constant and font follows; the panes keep their size relative to the scale,
+        the window grows to its new minimum when it is smaller; the selection, check,
+        view and zoom stay."""
+        s = max(sizing.LOW, min(sizing.HIGH, round(s, 2)))
+        if abs(s - self.s) < 1e-9:
+            return
+        self._remember_panes()
+        ratio = s / self.s
+        self.sizes = dict((k, int(round(v * ratio))) for k, v in self.sizes.items())
+        self.s, self.font_scale, self._font_cache = s, s / self.s0, {}
+        min_w, min_h = sizing.minimum(s)
+        self.min_width = min_w
+        self.root.minsize(min_w, min_h)
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        if w < min_w or h < min_h:
+            self.root.geometry("%dx%d" % (max(w, min_w), max(h, min_h)))
+        self.set_theme(self.theme_name)
+
     def _paned(self, parent, orient):
         """A resizable split; its background is the colour of the draggable divider."""
         return tk.PanedWindow(parent, orient=orient, sashwidth=self.ipx(sizing.SASH), sashrelief="flat", sashpad=0, bd=0,
@@ -173,7 +199,7 @@ class App:
         self.filter_var.trace_add("write", lambda *a: self.set_filter(self.filter_var.get()))
         self.plist = self._canvas(lst, "panel")
         self.plist.pack(fill="both", expand=True)
-        self._scrollable(self.plist)
+        self._scrollable(self.plist, bg="panel")
         left.add(lst, minsize=ipx(sizing.MIN_LIST), stretch="always")
         body.add(left, width=self.sizes["left"], minsize=ipx(MIN_LEFT), stretch="never")
 
@@ -196,7 +222,7 @@ class App:
         body.add(center, minsize=ipx(MIN_CENTER), stretch="always")
 
         self.insp = self._canvas(body, "panel")
-        self._scrollable(self.insp)
+        self._scrollable(self.insp, bg="panel")
         body.add(self.insp, width=self.sizes["right"], minsize=ipx(MIN_RIGHT), stretch="never")
         body.paneconfigure(left, hide=not self.show_left)
         body.paneconfigure(self.insp, hide=not self.show_right)
@@ -232,8 +258,9 @@ class App:
         self._static_job = None
         self._redraw_static()
 
-    def _scrollable(self, canvas, zoom=False):
+    def _scrollable(self, canvas, zoom=False, bg="bg"):
         canvas.configure(xscrollincrement=1, yscrollincrement=1)
+        self._scrollbars(canvas, bg)
 
         def wheel(event, horizontal=False):
             px = int(-event.delta / 4.0) or (-1 if event.delta > 0 else 1)
@@ -253,9 +280,48 @@ class App:
         except tk.TclError:                     # Tk 8.6 has no touchpad events
             pass
         if zoom:
-            mod = "Command" if self.root.tk.call("tk", "windowingsystem") == "aqua" else "Control"
-            canvas.bind("<%s-MouseWheel>" % mod,
+            canvas.bind("<%s-MouseWheel>" % self.mod,
                         lambda e: self.set_zoom(self.zoom * (1.1 if e.delta > 0 else 1 / 1.1)))
+        if sizing.wheel_buttons(self.root.tk.call("tk", "windowingsystem"), tk.TkVersion):
+            step = self.ipx(40)
+            for button, sign in (4, -1), (5, 1):
+                canvas.bind("<Button-%d>" % button, lambda e, d=sign: canvas.yview_scroll(d * step, "units"))
+                canvas.bind("<Shift-Button-%d>" % button,
+                            lambda e, d=sign: canvas.xview_scroll(d * step, "units"))
+                if zoom:
+                    canvas.bind("<Control-Button-%d>" % button,
+                                lambda e, d=sign: self.set_zoom(self.zoom * (1.1 if d < 0 else 1 / 1.1)))
+
+    def _scrollbars(self, canvas, bg):
+        """R53: a thin scroll bar on each axis, laid over the canvas's right / bottom edge and
+        shown only while the content is larger than the canvas on that axis."""
+        style = ttk.Style(self.root)
+        if style.theme_use() != "clam":
+            style.theme_use("clam")      # the one built-in theme whose bars take colours
+        for orient, axis in (("vertical", "y"), ("horizontal", "x")):
+            name = "%s.%s.TScrollbar" % (bg, orient.capitalize())
+            part = orient.capitalize() + ".Scrollbar."
+            style.layout(name, [(part + "trough", {"sticky": "nswe", "children": [
+                (part + "thumb", {"expand": "1", "sticky": "nswe"})]})])
+            c = self.c
+            style.configure(name, troughcolor=c[bg], background=c["strong"], bordercolor=c[bg],
+                            lightcolor=c["strong"], darkcolor=c["strong"], arrowsize=self.ipx(7),
+                            borderwidth=0, relief="flat", gripcount=0)
+            style.map(name, background=[("active", c["wire"]), ("pressed", c["wire"])])
+            bar = ttk.Scrollbar(canvas, orient=orient, style=name,
+                                command=canvas.yview if axis == "y" else canvas.xview)
+
+            def update(first, last, bar=bar, axis=axis):
+                first, last = float(first), float(last)
+                if first <= 0.0 and last >= 1.0:
+                    bar.place_forget()
+                    return
+                if axis == "y":
+                    bar.place(relx=1.0, rely=0.0, relheight=1.0, x=-self.ipx(2), anchor="ne")
+                else:
+                    bar.place(relx=0.0, rely=1.0, relwidth=1.0, y=-self.ipx(2), anchor="sw")
+                bar.set(first, last)
+            canvas.configure(**{axis + "scrollcommand": update})
 
     def _bind_keys(self):
         def key(fn):
@@ -267,8 +333,21 @@ class App:
                       ("<Key-3>", lambda: self.set_tab("trace")),
                       ("<Key-f>", self.fit),
                       ("<Key-bracketleft>", lambda: self.toggle_panel("left")),
-                      ("<Key-bracketright>", lambda: self.toggle_panel("right"))):
+                      ("<Key-bracketright>", lambda: self.toggle_panel("right")),
+                      # R52: + / − zoom the schematic, 0 fits it.
+                      ("<Key-plus>", lambda: self.set_zoom(self.zoom * 1.2)),
+                      ("<Key-equal>", lambda: self.set_zoom(self.zoom * 1.2)),
+                      ("<Key-KP_Add>", lambda: self.set_zoom(self.zoom * 1.2)),
+                      ("<Key-minus>", lambda: self.set_zoom(self.zoom / 1.2)),
+                      ("<Key-KP_Subtract>", lambda: self.set_zoom(self.zoom / 1.2)),
+                      ("<Key-0>", self.fit)):
             self.root.bind(k, key(fn))
+        # R52: ⌘/Ctrl + / − / 0 change the UI scale, also while typing in the filter.
+        for k, fn in (("plus", lambda: self.set_scale(self.s + SCALE_STEP)),
+                      ("equal", lambda: self.set_scale(self.s + SCALE_STEP)),
+                      ("minus", lambda: self.set_scale(self.s - SCALE_STEP)),
+                      ("Key-0", lambda: self.set_scale(self.s_start))):
+            self.root.bind("<%s-%s>" % (self.mod, k), lambda e, f=fn: (f(), "break")[1])
 
     # ------------------------------------------------------------------ state
 
@@ -478,6 +557,30 @@ class App:
     def _text(self, cv, x, y, text, kind="ui", size=12, bold=False, fill="ink", anchor="w", **kw):
         return cv.create_text(x, y, text=text, font=self.font(kind, size, bold), fill=self.c.get(fill, fill),
                               anchor=anchor, **kw)
+
+    def _fit(self, text, kind, size, bold, width, keep="start"):
+        """`text`, cut to `width` pixels with an ellipsis (R53): keep="start" keeps its
+        beginning (a cell name), keep="end" its end (a pin path)."""
+        f = self.font(kind, size, bold)
+        if f.measure(text) <= width:
+            return text
+        cut = (lambda n: text[:n] + "…") if keep == "start" else (lambda n: "…" + text[len(text) - n:])
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if f.measure(cut(mid)) <= width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return cut(lo)
+
+    def cell_label(self, name):
+        """R53: a cell name without the prefix and suffix every cell of the design shares."""
+        prefix, suffix = self.affix
+        if name and name.startswith(prefix) and name.endswith(suffix) \
+                and len(name) > len(prefix) + len(suffix):
+            return name[len(prefix):len(name) - len(suffix)]
+        return name
 
     def _caps(self, text):
         """Small capitals tracked out with thin spaces."""
@@ -916,9 +1019,17 @@ class App:
         outline = c["ink"] if on or selected else c["faint"]
         fill = c["select"] if selected else c["raised"]
         x0, y0, x1, y1 = e["x0"], e["y0"], e["x1"], e["y1"]
-        name = self._text(cv, S(x0 + 4), S(y0 + 12), e["name"], "ui", 11 * z, True, "ink" if on else "muted")
-        cell = self._text(cv, S(x1 - 4), S(y0 + 12), e["cell"], "mono", 9 * z, False, "faint", "e")
-        for it in (name, cell):
+        # R53: the instance name first, then as much of the cell's label as the box leaves.
+        avail, label = S(x1 - x0 - 8), self.cell_label(e["cell"])
+        label_w = self.font("mono", 9 * z).measure(label)
+        shown = self._fit(e["name"], "ui", 11 * z, True, max(avail * 0.6, avail - label_w - S(8)), "end")
+        name = self._text(cv, S(x0 + 4), S(y0 + 12), shown, "ui", 11 * z, True, "ink" if on else "muted")
+        room = avail - self.font("ui", 11 * z, True).measure(shown) - S(8)
+        items = [name]
+        if room > S(16):
+            items.append(self._text(cv, S(x1 - 4), S(y0 + 12), self._fit(label, "mono", 9 * z, False, room),
+                                    "mono", 9 * z, False, "faint", "e"))
+        for it in items:
             self._hit(cv, it, lambda k=e["name"]: self.select_cell(k))
         bx0, by0, bx1, by1 = x0 + 24, y0 + model.HEAD - 2, x1 - 24, y1 - model.PAD + 2
         mid = (by0 + by1) / 2.0
@@ -1138,19 +1249,27 @@ class App:
         path = self.path()
         if not path:
             return
-        xs, x, row_h = [], P(24), P(ROW)
-        for title, width, anchor in TABLE:
-            xs.append((x, P(width), anchor))
-            self._text(cv, x + (P(width - 6) if anchor == "e" else 0), P(20), self._caps(title), "ui", 9, True, "faint",
-                       anchor)
-            x += P(width)
-        right = x
-        cv.create_line(P(24), P(34), max(w - P(24), right), P(34), fill=c["line"])
-        num = lambda k: xs[k][0] + xs[k][1] - P(6)       # right edge of a number column
         trace = self.tab == "trace"
         sections, slack = model.path_table(path, self.source), path["slack"]
         if trace:                        # R41: replayed numbers only; not reached = blank
             sections, slack = model.trace_table(sections, path, self.replay)
+        # R53: the pin and cell columns widen to their longest entry, up to a cap; longer
+        # entries are cut with an ellipsis (a pin keeps its end, a cell its beginning).
+        rows = [r for sec in sections for r in sec["rows"] if "arc" in r]
+        body = self.font("ui", 12)
+        widths = [P(width) for _, width, _ in TABLE]
+        widths[0] = min(P(260), max([widths[0]] + [body.measure(r["label"]) + P(14) for r in rows]))
+        widths[1] = min(P(180), max([widths[1]] + [body.measure(self.cell_label(r["cell"]) or "port") + P(14)
+                                                   for r in rows]))
+        xs, x, row_h = [], P(24), P(ROW)
+        for (title, _, anchor), width in zip(TABLE, widths):
+            xs.append((x, width, anchor))
+            self._text(cv, x + (width - P(6) if anchor == "e" else 0), P(20), self._caps(title), "ui", 9, True,
+                       "faint", anchor)
+            x += width
+        right = x
+        cv.create_line(P(24), P(34), max(w - P(24), right), P(34), fill=c["line"])
+        num = lambda k: xs[k][0] + xs[k][1] - P(6)       # right edge of a number column
         blank = lambda v, f=fmt4: "" if v is None else f(v)
         signed = lambda v: "" if v is None else ("+" if v >= 0 else "") + fmt4(v)
         y = P(42)
@@ -1170,7 +1289,9 @@ class App:
                              outline="")
                 if "arc" in r:
                     cell_row = r["kind"] in ("cell", "ckq")
-                    values = [r["label"], r["cell"] or "port", r["arc"], r["rf"],
+                    values = [self._fit(r["label"], "ui", 12, False, xs[0][1] - P(8), "end"),
+                              self._fit(self.cell_label(r["cell"]) or "port", "ui", 12, False, xs[1][1] - P(8)),
+                              r["arc"], r["rf"],
                               _num(r["load"]) if r["load"] is not None else "",
                               "" if r["fanout"] is None else str(r["fanout"]),
                               blank(r["slew"]) if trace else _num(r["slew"]), signed(r["incr"]), blank(r["value"]),
@@ -1189,7 +1310,8 @@ class App:
                     hit = cv.create_rectangle(0, y, w, y + row_h, outline="", fill="")
                     self._hit(cv, hit, lambda k=idx: self.select_stage(k))
                 else:
-                    label = r["label"] + ("  (%s)" % r["cell"] if r.get("cell") else "")
+                    label = r["label"] + ("  (%s)" % self.cell_label(r["cell"]) if r.get("cell") else "")
+                    label = self._fit(label, "ui", 12, False, xs[7][0] - xs[0][0] - P(8))
                     self._text(cv, xs[0][0], mid, label, "ui", 12, False, "ink" if r.get("cell") else "muted")
                     if r.get("incr") is not None:
                         self._text(cv, num(7), mid, signed(r["incr"]), "mono", 11, False, "muted", "e")
@@ -1209,7 +1331,12 @@ class App:
             self._text(cv, num(8), mid, fmt4(slack), "mono", 12, True, "bad" if bad else "ok", "e")
         self._run(cv, P(24), mid, parts)
         note = self._text(cv, right + P(12), mid, "pin slack: the worst slack through the pin", "ui", 10, False, "faint")
-        cv.configure(scrollregion=(0, 0, max(w, cv.bbox(note)[2] + P(12)), y + row_h + P(24)))
+        bottom = y + row_h + P(24)
+        if any(self.affix):              # R53: the part every cell name shares, said once
+            hidden = "Cell names are shown without %s." % " … ".join(a for a in self.affix if a)
+            self._text(cv, P(24), bottom, hidden, "ui", 10, False, "faint")
+            bottom += P(24)
+        cv.configure(scrollregion=(0, 0, max(w, cv.bbox(note)[2] + P(12)), bottom))
 
     # right: inspector -----------------------------------------------------------------------
 
@@ -1242,8 +1369,8 @@ class App:
         if kind is None:
             pins = self.source.instance(sel.split("/")[0])["pins"]
             kind = [p["direction"] for p in pins if p["name"] == sel.split("/")[1]][0] + " pin"
-        self._text(cv, P(20), y, "%s%s" % ((info["cell"] + " · ") if info["cell"] else "", kind), "ui", 11, False,
-                   "muted")
+        line = "%s%s" % ((self.cell_label(info["cell"]) + " · ") if info["cell"] else "", kind)
+        self._text(cv, P(20), y, self._fit(line, "ui", 11, False, w - P(40)), "ui", 11, False, "muted")
         y += P(28)
         y = self._values_card(info, y)
         if point is not None:
@@ -1367,7 +1494,8 @@ class App:
         k = self.stage
         if point["arc"] in ("cell", "ckq"):
             prev = pts[k - 1]
-            title = "delay lookup · %s %s→%s" % (point["cell"], prev["pin"].split("/")[-1], point["pin"].split("/")[-1])
+            title = "delay lookup · %s %s→%s" % (self.cell_label(point["cell"]), prev["pin"].split("/")[-1],
+                                                 point["pin"].split("/")[-1])
             lines = [("input slew", "%s  %s %s" % (fmt4(prev["slew"]), prev["pin"], prev["rf"])),
                      ("output load", _num(point["cap"])),
                      ("→ delay", "%s  %s→%s" % (fmt4(point["incr"]), prev["rf"], point["rf"])),
@@ -1462,9 +1590,14 @@ class App:
         P = self.px
         cv, w = self.insp, max(self.insp.winfo_width(), P(MIN_RIGHT))
         info = self.source.instance(inst)
-        self._text(cv, P(20), y, inst, "ui", 16, True, "ink")
-        self._text(cv, P(20), y + P(22), "%s · %s" % (info["cell"], model.symbol(info)), "ui", 11, False, "muted")
+        self._text(cv, P(20), y, self._fit(inst, "ui", 16, True, w - P(40), "end"), "ui", 16, True, "ink")
+        self._text(cv, P(20), y + P(22), "%s · %s" % (self.cell_label(info["cell"]), model.symbol(info)), "ui", 11,
+                   False, "muted")
         y += P(50)
+        if self.cell_label(info["cell"]) != info["cell"]:          # R53: the full name, once
+            self._text(cv, P(20), y - P(8), self._fit(info["cell"], "mono", 10, False, w - P(40)), "mono", 10, False,
+                       "faint")
+            y += P(18)
         for a in self.source.arcs(inst):
             late = [(ab, v) for ab, v in sorted(a["delay"]["late"].items()) if v is not None]
             yy = self._section(cv, y, "%s → %s · %s" % (a["from"].split("/")[-1], a["to"].split("/")[-1], a["kind"]), w)
@@ -1480,4 +1613,5 @@ class App:
         self._clear(cv)
         w = max(cv.winfo_width(), self.min_width)
         cv.create_line(0, 0, w, 0, fill=c["line"])
-        self._text(cv, self.px(20), self.px(13), HINT, "ui", 10, False, "faint")
+        self._text(cv, self.px(20), self.px(13), self._fit(HINT % self.mod_name, "ui", 10, False, w - self.px(40)),
+                   "ui", 10, False, "faint")

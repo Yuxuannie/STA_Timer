@@ -52,3 +52,8 @@ def geometry(s, screen_w, screen_h):
     w = max(min_w, int(min(WIDTH * s, 0.92 * screen_w)))
     h = max(min_h, int(min(HEIGHT * s, 0.90 * screen_h)))
     return w, h, max(0, (screen_w - w) // 2), max(0, (screen_h - h) // 2), min_w, min_h
+
+
+def wheel_buttons(windowing_system, tk_version):
+    """R52: Tk 8.6 on X11 sends the mouse wheel as buttons 4 and 5, not <MouseWheel>."""
+    return windowing_system == "x11" and tk_version < 8.7

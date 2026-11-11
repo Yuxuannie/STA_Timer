@@ -85,6 +85,10 @@ class EngineSource:
             out[check] = None if p is None else paths.path_json(p, self.g.sdc, check)
         return out
 
+    def cells(self):
+        """R53: the names of the cells the design uses."""
+        return sorted(set(self._cells.values()))
+
     def instance(self, inst):
         cell = self.g.lib.cells[self._cells[inst]]
         return {"cell": cell.name, "sequential": cell.sequential,
@@ -239,6 +243,10 @@ class BundleSource:
     def paths(self, endpoint):
         found = dict((p["check"], p) for p in self.data["paths"])
         return {"setup": found.get("setup"), "hold": found.get("hold")}
+
+    def cells(self):
+        """R53: the names of the cells of the bundle's instances."""
+        return sorted(set(i["cell"] for i in self.data["instances"].values()))
 
     def instance(self, inst):
         info = self.data["instances"][inst]

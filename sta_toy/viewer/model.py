@@ -634,3 +634,39 @@ def auto_expand(path, source, limit=300):
         if not stubs or pins >= limit:
             return lay, bool(stubs)
         expanded = lay["expanded"] + stubs
+
+
+def cell_affixes(names):
+    """R53: (prefix, suffix) that every cell name of a design shares, left out wherever the
+    viewer shows a cell name. The prefix ends with "_" (sky130_fd_sc_hd__inv_2); the suffix
+    starts with "_" or follows a digit in every name, so a drive strength stays
+    (INVD4|BWP156HPNPN3P48SPRCPDSVT). Each is at least 4 characters and every name keeps at
+    least 2; otherwise that part is "". Fewer than two names: ("", "")."""
+    names = sorted(set(names))
+    if len(names) < 2:
+        return "", ""
+    prefix = _common(names)
+    prefix = prefix[:prefix.rfind("_") + 1]
+    suffix = _common([n[::-1] for n in names])[::-1]
+
+    def follows_digit(k):
+        return all(len(n) > k and n[len(n) - k - 1].isdigit() for n in names)
+    while suffix and not (suffix[0] == "_" or follows_digit(len(suffix))):
+        suffix = suffix[1:]
+    prefix, suffix = (prefix if len(prefix) >= 4 else ""), (suffix if len(suffix) >= 4 else "")
+    for drop in ("prefix", "suffix"):
+        if all(len(n) - len(prefix) - len(suffix) >= 2 for n in names):
+            break
+        if drop == "prefix":
+            prefix = ""
+        else:
+            suffix = ""
+    return prefix, suffix
+
+
+def _common(texts):
+    first = texts[0]
+    k = 0
+    while k < len(first) and all(len(t) > k and t[k] == first[k] for t in texts):
+        k += 1
+    return first[:k]
